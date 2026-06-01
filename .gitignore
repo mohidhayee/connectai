@@ -1,0 +1,17 @@
+# Secrets — NEVER commit these
+.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Claude Code internal (not part of the open-source project)
+.claude/
+
+# Internal research notes (decide later if you want these public)
+ConnectAI_Report.md
