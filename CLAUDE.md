@@ -18,9 +18,24 @@ model for what it's best at.
 - ✅ **Phase 2** — two-agent collaboration engine: `agent.py`, `orchestrator.py`, `run.py`
 - ✅ **Phase 3** — Streamlit web UI: `app.py` (`streamlit run app.py`)
 - ✅ **Phase 4** — launch docs: real `README.md`, `LICENSE` (MIT), `.env.example`
-- ✅ **Phase 4.5** — BYO keys + per-model picker + 2–4 agents (see below)
-- ⏭️ **NEXT → Phase 5** — add a README screenshot; deploy free demo to Streamlit
-  Community Cloud; user posts to ≥3 communities (needs user's accounts).
+- ✅ **Phase 4.5** — BYO keys + per-model picker (5 providers) + 2–4 agents + tabbed UI.
+  All 5 keys (Groq/Gemini/OpenAI/Anthropic/Perplexity) live in `.env` and tested working.
+- ⏭️ **NEXT → Phase 5** — add a README screenshot (TODO marker is in `README.md`); deploy
+  free demo to Streamlit Community Cloud; user posts to ≥3 communities (needs user accounts).
+- 🔮 **Future → "Manager mode"** — let agents truly collaborate via a lead/manager agent
+  (design sketch below). Deferred: it's a real feature deserving a fresh session.
+
+## Manager mode (next big feature — design sketch for a fresh session)
+Today agents take fixed round-robin turns over a shared scratchpad (`orchestrator.run`).
+The next step the user wants: a **manager/supervisor pattern** (not free-for-all chatter,
+which is messier + burns tokens). Plan:
+- Designate one agent as **lead** (e.g. agent 1, or a UI toggle / a dedicated "Manager" role).
+- New orchestrator mode: lead reads the task → decides *which* worker does *what* (delegates)
+  → workers reply → lead **synthesizes** the final answer. Lead drives the loop instead of
+  fixed round-robin.
+- Keep the hand-rolled style. Add a mode switch in `orchestrator.py` (round-robin vs manager)
+  and a UI control in the **Team** tab to pick the lead. Watch cost — delegation = more calls.
+- Verify free with Groq + Gemini before using paid models.
 
 Full build plan: `~/.claude/plans/lets-go-with-that-quirky-feather.md`
 Strategy/market context: `~/.claude/projects/-Users-mohidhayee-Documents-ConnectAI/memory/`
