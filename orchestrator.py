@@ -45,13 +45,21 @@ def run(agent_a, agent_b, task, max_turns=8):
 
         reply = agent.reply(user_msg)
 
+        # "DONE" is a control signal, not content — strip it before showing
+        # or storing, so it doesn't leak into the output or the next agent's
+        # view of the scratchpad.
+        done_this_turn = reply.strip().upper().startswith(_DONE_SIGNAL)
+        if done_this_turn:
+            parts = reply.strip().split("\n", 1)
+            reply = parts[1].strip() if len(parts) > 1 else ""
+
         # Show a short preview (first 160 chars) so the terminal doesn't flood.
         preview = reply[:160] + ("…" if len(reply) > 160 else "")
         print(f"  → {preview}")
 
         scratchpad += f"\n--- {agent.name} (turn {turn}) ---\n{reply}\n"
 
-        if reply.strip().upper().startswith(_DONE_SIGNAL):
+        if done_this_turn:
             print(f"\n  ✓ {agent.name} signalled DONE.")
             break
     else:
@@ -64,23 +72,37 @@ def run(agent_a, agent_b, task, max_turns=8):
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 def _build_prompt(task, scratchpad, turn):
-    """Build the user message the current agent receives."""
+    """Build the user message the current agent receives.
+
+    Only Agent B (even turns) is told it can signal DONE.
+    Agent A always hands off — this prevents the first agent from completing
+    the whole task solo and never involving the second agent.
+    """
+    can_stop = (turn % 2 == 0)
+
     if scratchpad:
-        return (
+        msg = (
             f"TASK: {task}\n\n"
             f"SCRATCHPAD — work done so far:\n{scratchpad}\n\n"
             "It's your turn. Read the scratchpad, then continue the work. "
             "Build on what's already there — don't repeat it. "
+        )
+    else:
+        msg = (
+            f"TASK: {task}\n\n"
+            "You're going first. Write your contribution — "
+            "your collaborator will build on it next. "
+        )
+
+    if can_stop:
+        msg += (
             "When the task is fully complete, start your reply with the single word DONE "
             "(on its own line, in capitals)."
         )
     else:
-        return (
-            f"TASK: {task}\n\n"
-            "You're going first. Start working on the task. "
-            "When the task is fully complete, start your reply with the single word DONE "
-            "(on its own line, in capitals)."
-        )
+        msg += "Write your contribution, then your collaborator will continue."
+
+    return msg
 
 
 def _print_header(task, agent_a, agent_b, max_turns):
