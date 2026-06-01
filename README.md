@@ -8,7 +8,7 @@ team that collaborates on a shared task. Use each model for what it's best at, t
 ## Status
 
 - [x] Phase 0 — Project setup
-- [ ] Phase 1 — Multi-provider core (one interface for all providers)
+- [x] Phase 1 — Multi-provider core (one interface for all providers)
 - [ ] Phase 2 — Two-agent collaboration engine
 - [ ] Phase 3 — Simple web UI
 - [ ] Phase 4 — Open-source launch
