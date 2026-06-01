@@ -15,11 +15,8 @@ model for what it's best at.
 ## Current status
 - ✅ **Phase 0** — setup, two providers working, repo on GitHub
 - ✅ **Phase 1** — unified provider interface (`providers.ask()`) + cost tracking
-- ⏭️ **NEXT → Phase 2** — two-agent collaboration engine. Build `agent.py` (an Agent
-  class: name, provider, role/system prompt, own message history), `orchestrator.py`
-  (loop where two agents from *different* providers take turns on a shared task +
-  shared scratchpad until done or a turn limit), and `run.py` (a CLI to try it). Show a
-  live cost + turn meter. Keep it hand-rolled (no LangGraph yet) so the user learns.
+- ✅ **Phase 2** — two-agent collaboration engine: `agent.py`, `orchestrator.py`, `run.py`
+- ⏭️ **NEXT → Phase 3** — TBD (streaming output, more agents/providers, web UI, …)
 
 Full build plan: `~/.claude/plans/lets-go-with-that-quirky-feather.md`
 Strategy/market context: `~/.claude/projects/-Users-mohidhayee-Documents-ConnectAI/memory/`
@@ -27,8 +24,10 @@ Strategy/market context: `~/.claude/projects/-Users-mohidhayee-Documents-Connect
 ## How to run
 ```bash
 source .venv/bin/activate
-python test_providers.py     # confirm all providers work
-python hello.py              # original Phase 0 smoke test
+python test_providers.py                   # confirm all providers work
+python hello.py                            # Phase 0 smoke test
+python run.py "your task here"             # Phase 2: two-agent collaboration
+python run.py                              # interactive prompt
 ```
 
 ## Architecture (keep it this way)
