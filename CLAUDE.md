@@ -16,7 +16,10 @@ model for what it's best at.
 - ✅ **Phase 0** — setup, two providers working, repo on GitHub
 - ✅ **Phase 1** — unified provider interface (`providers.ask()`) + cost tracking
 - ✅ **Phase 2** — two-agent collaboration engine: `agent.py`, `orchestrator.py`, `run.py`
-- ⏭️ **NEXT → Phase 3** — TBD (streaming output, more agents/providers, web UI, …)
+- ✅ **Phase 3** — Streamlit web UI: `app.py` (`streamlit run app.py`)
+- 🔨 **Phase 4 (in progress)** — open-source launch. Done: real `README.md`, `LICENSE`
+  (MIT), `.env.example` includes Groq. TODO: add a screenshot to README; deploy free demo
+  to Streamlit Community Cloud; user posts to ≥3 communities (needs user's accounts).
 
 Full build plan: `~/.claude/plans/lets-go-with-that-quirky-feather.md`
 Strategy/market context: `~/.claude/projects/-Users-mohidhayee-Documents-ConnectAI/memory/`
