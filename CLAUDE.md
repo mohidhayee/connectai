@@ -17,9 +17,10 @@ model for what it's best at.
 - ✅ **Phase 1** — unified provider interface (`providers.ask()`) + cost tracking
 - ✅ **Phase 2** — two-agent collaboration engine: `agent.py`, `orchestrator.py`, `run.py`
 - ✅ **Phase 3** — Streamlit web UI: `app.py` (`streamlit run app.py`)
-- 🔨 **Phase 4 (in progress)** — open-source launch. Done: real `README.md`, `LICENSE`
-  (MIT), `.env.example` includes Groq. TODO: add a screenshot to README; deploy free demo
-  to Streamlit Community Cloud; user posts to ≥3 communities (needs user's accounts).
+- ✅ **Phase 4** — launch docs: real `README.md`, `LICENSE` (MIT), `.env.example`
+- ✅ **Phase 4.5** — BYO keys + per-model picker + 2–4 agents (see below)
+- ⏭️ **NEXT → Phase 5** — add a README screenshot; deploy free demo to Streamlit
+  Community Cloud; user posts to ≥3 communities (needs user's accounts).
 
 Full build plan: `~/.claude/plans/lets-go-with-that-quirky-feather.md`
 Strategy/market context: `~/.claude/projects/-Users-mohidhayee-Documents-ConnectAI/memory/`
@@ -27,18 +28,25 @@ Strategy/market context: `~/.claude/projects/-Users-mohidhayee-Documents-Connect
 ## How to run
 ```bash
 source .venv/bin/activate
-python test_providers.py                   # confirm all providers work
-python hello.py                            # Phase 0 smoke test
-python run.py "your task here"             # Phase 2: two-agent collaboration
-python run.py                              # interactive prompt
+python test_providers.py                   # confirm providers with keys work
+python run.py "your task here"             # CLI: multi-agent collaboration
+streamlit run app.py                       # web UI (BYO keys, 2–4 agents, model picker)
 ```
 
 ## Architecture (keep it this way)
-- `config.py` — friendly provider name → model + API-key env var. **Change models only here.**
-- `providers.py` — `ask(prompt, provider="groq", system=None)` is the ONE way to call any
-  AI. Tracks cost via `total_cost()`. Never call litellm directly elsewhere.
-- `test_providers.py` — smoke test for every provider in config.
-- `.env` — secrets (gitignored, NEVER commit). `.env.example` shows the shape.
+- `config.py` — the catalog: `PROVIDERS` (label/emoji/key_env/tier) + `MODELS` (curated
+  list per provider, each `{id,label,strength}`). **Add/retire models only here.**
+- `providers.py` — `ask(prompt, *, model, system=None, messages=None, api_key=None)` is the
+  ONE way to call any model. Provider is inferred from the model id (`provider_for`); key is
+  the passed `api_key` else the provider's env var. Tracks cost via `total_cost()`. Never
+  call litellm directly elsewhere.
+- `agent.py` — `Agent(name, model, role, api_key=None)`; `.provider` is derived from model.
+- `orchestrator.py` — `run(agents_list, task, max_turns)`; round-robin over 2–4 agents; an
+  agent may only signal DONE at the end of a full round (`turn>=n and turn%n==0`).
+- `app.py` — imports `_build_prompt`/`_DONE_SIGNAL` from orchestrator (one source of truth).
+  BYO keys live in `st.session_state` only (never written to disk).
+- `test_providers.py` — smoke-tests the first model of each provider that has a key.
+- `.env` — secrets (gitignored, NEVER commit). All keys optional; `.env.example` shows shape.
 
 ## Provider notes (learned the hard way)
 - Default dev provider is **groq** (free). Google's free Gemini tier is **blocked in the

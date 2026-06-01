@@ -1,14 +1,17 @@
 """
-orchestrator.py — drives two agents on a shared task.
+orchestrator.py — drives a team of agents (2–4) on a shared task.
 
 How it works:
-  1. Agent A gets the task and writes the first contribution.
-  2. Agent B sees the task + everything written so far, then contributes.
-  3. They keep alternating until one says DONE or the turn limit is reached.
+  1. Each agent takes a turn in order (round-robin): A, B, C, A, B, C, ...
+  2. Every agent sees the task + everything written so far (the scratchpad),
+     then adds its own contribution.
+  3. They keep going until an agent signals DONE or the turn limit is reached.
 
-Everything each agent writes is added to a shared "scratchpad" — a
-running text document that both agents read and add to, like a shared
-Google Doc. This is how they collaborate without talking directly.
+The "scratchpad" is a running text document the whole team reads and adds to,
+like a shared Google Doc. That's how they collaborate without talking directly.
+
+To make sure everyone contributes before the work is closed out, an agent may
+only signal DONE at the end of a full round (after every agent has had a turn).
 """
 
 import providers
@@ -17,26 +20,30 @@ import providers
 _DONE_SIGNAL = "DONE"
 
 
-def run(agent_a, agent_b, task, max_turns=8):
-    """Run two agents on a task and return the final scratchpad.
+def run(agents, task, max_turns=8):
+    """Run a team of agents on a task and return the final scratchpad.
 
     Args:
-        agent_a, agent_b:  Agent instances — should use different providers.
-        task:              Plain-text description of what to accomplish.
-        max_turns:         Hard cap on total turns (each agent reply = 1 turn).
+        agents:     list of 2–4 Agent instances (ideally different providers).
+        task:       plain-text description of what to accomplish.
+        max_turns:  hard cap on total turns (each agent reply = 1 turn).
 
     Returns:
         The final scratchpad as a string.
     """
+    n = len(agents)
     scratchpad = ""
-    agents = [agent_a, agent_b]
 
-    _print_header(task, agent_a, agent_b, max_turns)
+    _print_header(agents, task, max_turns)
 
     for turn in range(1, max_turns + 1):
-        agent = agents[(turn - 1) % 2]  # agent_a on odd turns, agent_b on even
+        agent = agents[(turn - 1) % n]
 
-        user_msg = _build_prompt(task, scratchpad, turn)
+        # An agent may only finish at the end of a full round, so everyone
+        # contributes at least once before the work is closed out.
+        can_stop = (turn >= n) and (turn % n == 0)
+
+        user_msg = _build_prompt(agents, agent, task, scratchpad, can_stop)
 
         print(
             f"\n[Turn {turn}/{max_turns}]  {agent.name} ({agent.provider})"
@@ -45,15 +52,13 @@ def run(agent_a, agent_b, task, max_turns=8):
 
         reply = agent.reply(user_msg)
 
-        # "DONE" is a control signal, not content — strip it before showing
-        # or storing, so it doesn't leak into the output or the next agent's
-        # view of the scratchpad.
+        # "DONE" is a control signal, not content — strip it before showing or
+        # storing, so it doesn't leak into output or the next agent's view.
         done_this_turn = reply.strip().upper().startswith(_DONE_SIGNAL)
         if done_this_turn:
             parts = reply.strip().split("\n", 1)
             reply = parts[1].strip() if len(parts) > 1 else ""
 
-        # Show a short preview (first 160 chars) so the terminal doesn't flood.
         preview = reply[:160] + ("…" if len(reply) > 160 else "")
         print(f"  → {preview}")
 
@@ -71,18 +76,14 @@ def run(agent_a, agent_b, task, max_turns=8):
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
-def _build_prompt(task, scratchpad, turn):
-    """Build the user message the current agent receives.
-
-    Only Agent B (even turns) is told it can signal DONE.
-    Agent A always hands off — this prevents the first agent from completing
-    the whole task solo and never involving the second agent.
-    """
-    can_stop = (turn % 2 == 0)
+def _build_prompt(agents, current, task, scratchpad, can_stop):
+    """Build the user message the current agent receives."""
+    teammates = ", ".join(a.name for a in agents if a is not current)
 
     if scratchpad:
         msg = (
             f"TASK: {task}\n\n"
+            f"Your teammates on this task: {teammates}.\n\n"
             f"SCRATCHPAD — work done so far:\n{scratchpad}\n\n"
             "It's your turn. Read the scratchpad, then continue the work. "
             "Build on what's already there — don't repeat it. "
@@ -90,25 +91,27 @@ def _build_prompt(task, scratchpad, turn):
     else:
         msg = (
             f"TASK: {task}\n\n"
+            f"Your teammates on this task: {teammates}.\n\n"
             "You're going first. Write your contribution — "
-            "your collaborator will build on it next. "
+            "your teammates will build on it next. "
         )
 
     if can_stop:
         msg += (
-            "When the task is fully complete, start your reply with the single word DONE "
-            "(on its own line, in capitals)."
+            "If the task is now fully complete, start your reply with the single "
+            "word DONE (on its own line, in capitals). Otherwise just continue the work."
         )
     else:
-        msg += "Write your contribution, then your collaborator will continue."
+        msg += "Write your contribution, then your teammates will continue."
 
     return msg
 
 
-def _print_header(task, agent_a, agent_b, max_turns):
+def _print_header(agents, task, max_turns):
+    team = "  ↔  ".join(f"{a.name} ({a.provider})" for a in agents)
     print(f"\n{'='*62}")
     print(f"TASK : {task}")
-    print(f"AGENTS: {agent_a.name} ({agent_a.provider})  ↔  {agent_b.name} ({agent_b.provider})")
+    print(f"TEAM : {team}")
     print(f"MAX TURNS: {max_turns}")
     print('='*62)
 

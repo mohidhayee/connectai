@@ -1,0 +1,10 @@
+# Streamlit theme — a modern dark look for ConnectAI.
+# Edit colours here; the whole app picks them up automatically.
+
+[theme]
+base = "dark"
+primaryColor = "#7c5cff"            # violet accent (buttons, focus, sliders)
+backgroundColor = "#0d1017"         # app background
+secondaryBackgroundColor = "#161b26" # sidebar + cards
+textColor = "#e8eaed"
+font = "sans serif"

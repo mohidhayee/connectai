@@ -1,52 +1,47 @@
 """
-run.py — launch a two-agent collaboration from the command line.
+run.py — launch a multi-agent collaboration from the command line.
 
 Usage:
     python run.py                            # prompts you interactively
     python run.py "explain black holes"      # pass the task directly
 
-The two agents are:
-  Planner  (groq/llama)  — breaks the problem into structure
-  Writer   (gemini)      — fills in the detail and polishes the writing
+The default team is two agents from different providers:
+  Planner  (Groq llama)  — breaks the problem into structure
+  Writer   (Gemini)      — fills in the detail and polishes the writing
+
+Edit the `team` list below to add more agents (2–4) or swap their models.
 """
 
 import sys
 from agent import Agent
 from orchestrator import run as orchestrate
+from config import DEFAULT_MODEL_A, DEFAULT_MODEL_B
 
 
-# ── Agent definitions ──────────────────────────────────────────────────────────
-# Change the roles here to change how each agent behaves.
-
-planner = Agent(
-    name="Planner",
-    provider="groq",
-    role=(
-        "You are Planner, a strategic thinker and organiser. "
-        "Your job is to break the given task into a clear structure: "
-        "sections, key points, and a logical order. "
-        "Be concise. Use bullet points or numbered lists where helpful. "
-        "When reviewing the scratchpad, check that the structure is solid "
-        "and suggest any missing pieces."
+# ── The team ───────────────────────────────────────────────────────────────────
+# Add up to 4 agents here. Give each a different model to combine their strengths.
+team = [
+    Agent(
+        name="Planner",
+        model=DEFAULT_MODEL_A,
+        role=(
+            "You are Planner, a strategic thinker and organiser. "
+            "Break the given task into a clear structure: sections, key points, "
+            "and a logical order. Be concise. Use bullet points or numbered lists."
+        ),
     ),
-)
-
-writer = Agent(
-    name="Writer",
-    provider="gemini",
-    role=(
-        "You are Writer, a clear and engaging communicator. "
-        "Your job is to take the Planner's structure and turn it into "
-        "well-written, detailed content. "
-        "Always build on what's already in the scratchpad — never repeat "
-        "what's already there. "
-        "When the scratchpad contains a complete, polished result, "
-        "signal that the task is done."
+    Agent(
+        name="Writer",
+        model=DEFAULT_MODEL_B,
+        role=(
+            "You are Writer, a clear and engaging communicator. "
+            "Take the structure in the scratchpad and turn it into well-written, "
+            "detailed content. Build on what's there — never repeat it. "
+            "When the result is complete and polished, signal that it's done."
+        ),
     ),
-)
+]
 
-
-# ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     if len(sys.argv) > 1:
@@ -56,7 +51,7 @@ def main():
         if not task:
             task = "Write a short beginner's guide to staying focused while studying"
 
-    final_scratchpad = orchestrate(planner, writer, task, max_turns=6)
+    final_scratchpad = orchestrate(team, task, max_turns=6)
 
     print("\n\nFINAL OUTPUT (full scratchpad):")
     print("=" * 62)
