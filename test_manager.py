@@ -179,16 +179,18 @@ class FakeProvider:
 
     def __init__(self, manager_replies, *, worker_reply="WORKER OUTPUT",
                  synth_reply="SYNTHESISED ANSWER", fail_workers=False,
-                 cost_per_call=0.0, start_cost=0.0):
+                 cost_per_call=0.0, start_cost=0.0,
+                 critic_reply='{"accept": true, "feedback": "fine"}'):
         # manager_replies may be a list (consumed in order, last repeats) or a
         # callable taking the 1-based call number and returning a reply string.
         self.manager_replies = manager_replies
         self.worker_reply = worker_reply
         self.synth_reply = synth_reply
+        self.critic_reply = critic_reply
         self.fail_workers = fail_workers
         self.cost_per_call = cost_per_call
         self.cost = start_cost
-        self.calls = {"manager": 0, "worker": 0, "synth": 0}
+        self.calls = {"manager": 0, "worker": 0, "synth": 0, "critic": 0}
 
     def ask(self, prompt=None, *, model, system=None, messages=None, api_key=None):
         self.cost += self.cost_per_call
@@ -202,6 +204,9 @@ class FakeProvider:
         if system and "delivering the FINAL answer" in system:
             self.calls["synth"] += 1
             return self.synth_reply
+        if system and "quality checker" in system:
+            self.calls["critic"] += 1
+            return self.critic_reply(prompt) if callable(self.critic_reply) else self.critic_reply
         self.calls["worker"] += 1
         if self.fail_workers:
             raise providers.ProviderError("simulated worker failure")
@@ -355,6 +360,45 @@ def test_guardrails():
     check("cost cap (mid-run) → stop, assemble from work, no extra paid call", cost_cap_midrun)
 
 
+# ── OPTIONAL CRITIC: one bounded pass, default off, fails open ─────────────────--
+
+def test_critic():
+    print("\nOPTIONAL CRITIC (one bounded pass; default off; fails open):")
+
+    def critic_off():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider([_delegate("Writer", "do x"), _finish("DONE")])
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task")
+        assert fp.calls["critic"] == 0, fp.calls
+        assert not any(e["type"] == "critique" for e in events)
+    check("critic off by default → no quality-check call", critic_off)
+
+    def critic_on():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider([_delegate("Writer", "do x"), _finish("DONE")],
+                          critic_reply='{"accept": false, "feedback": "needs citations"}')
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task", use_critic=True)
+        assert fp.calls["critic"] == 1, fp.calls
+        crit = next((e for e in events if e["type"] == "critique"), None)
+        assert crit is not None, "no critique event emitted"
+        assert crit["accept"] is False and crit["feedback"] == "needs citations", crit
+        assert _final(events)["answer"] == "DONE"
+    check("critic on → one verdict per output, fed back, run still finishes", critic_on)
+
+    def critic_fails_open():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider([_delegate("Writer", "do x"), _finish("DONE")],
+                          critic_reply="totally not json")
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task", use_critic=True)
+        crit = next((e for e in events if e["type"] == "critique"), None)
+        assert crit is not None and crit["accept"] is True, crit   # failed open
+        assert _final(events)["answer"] == "DONE"
+    check("malformed critic verdict → fails open (accept), run unaffected", critic_fails_open)
+
+
 # ── Run everything ──────────────────────────────────────────────────────────────
 
 def main():
@@ -365,6 +409,7 @@ def main():
     test_valid_inputs()
     test_malformed_inputs()
     test_guardrails()
+    test_critic()
 
     print("\n" + "=" * 62)
     total = _passed + _failed

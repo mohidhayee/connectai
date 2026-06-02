@@ -240,7 +240,8 @@ def run_manager(manager, workers, task, *,
                 max_cost_usd=DEFAULT_MAX_COST_USD,
                 max_retries=DEFAULT_MAX_RETRIES,
                 max_calls_per_worker=DEFAULT_MAX_CALLS_PER_WORKER,
-                stall_limit=DEFAULT_STALL_LIMIT):
+                stall_limit=DEFAULT_STALL_LIMIT,
+                use_critic=False):
     """Run Manager Mode on a task, yielding events as they happen.
 
     Args:
@@ -252,11 +253,15 @@ def run_manager(manager, workers, task, *,
         max_retries:           re-asks allowed on malformed Manager JSON.
         max_calls_per_worker:  cap on how often one worker can be used.
         stall_limit:           consecutive no-progress steps before we force-stop.
+        use_critic:            if True, run ONE quality-check pass on each worker
+                               output (advisory; the verdict is fed back to the
+                               lead). Strictly one pass — it can never loop.
 
     Yields dicts with a "type":
         start            — run is beginning (manager, workers, task, caps)
         manager_decision — the Manager decided (decision, raw, attempts, error)
         worker_result    — a worker replied (worker, output, error, cost)
+        critique         — the optional critic judged a worker output (accept, feedback)
         guardrail        — a safety limit fired (name, detail) — observable!
         synthesis        — we're building a best-effort answer after a forced stop
         final            — the final answer (answer, finish_reason, steps, cost)
@@ -365,6 +370,17 @@ def run_manager(manager, workers, task, *,
                "model": worker.model, "instruction": instruction,
                "reason": decision["reason"], "output": output, "error": error,
                "cost": providers.total_cost()}
+
+        # OPTIONAL CRITIC (one pass, never loops): judge the worker output and
+        # feed the verdict back to the lead via the transcript. It's advisory —
+        # the lead decides what to do — and it fails OPEN, so it can't break a run.
+        if (use_critic and not error and output.strip()
+                and providers.total_cost() < max_cost_usd):
+            verdict = critique(manager, task, name, instruction, output)
+            transcript[-1]["critique"] = verdict
+            yield {"type": "critique", "step": steps_used, "worker": name,
+                   "accept": verdict["accept"], "feedback": verdict["feedback"],
+                   "cost": providers.total_cost()}
 
         # Track progress: a worker that returns real content resets the stall
         # counter; an empty reply counts as a stall (no-progress).
@@ -504,6 +520,57 @@ def _best_effort_from_transcript(transcript):
     return "\n\n".join(f"**{r['to']}:**\n{r['output']}" for r in outputs)
 
 
+# ── Optional critic (one bounded quality-check pass) ────────────────────────────--
+
+def critique(manager, task, worker_name, instruction, output):
+    """Ask the lead to judge ONE worker output. Returns {"accept", "feedback"}.
+
+    This is a quality aid, not a safety guardrail, so it FAILS OPEN: any provider
+    error or unparseable reply is treated as "accept" with empty feedback. It runs
+    at most once per worker output (see run_manager), so it can never loop.
+    """
+    system = _build_critic_system()
+    user = _build_critic_user(task, worker_name, instruction, output)
+    try:
+        raw = providers.ask(prompt=user, model=manager.model,
+                            system=system, api_key=manager.api_key)
+    except providers.ProviderError:
+        return {"accept": True, "feedback": ""}
+    return _parse_critique(raw)
+
+
+def _parse_critique(raw):
+    """Lenient parse of the critic's JSON verdict; fails open to accept."""
+    try:
+        data = json.loads(_extract_json_block(raw))
+        accept = data.get("accept")
+        if not isinstance(accept, bool):
+            return {"accept": True, "feedback": ""}
+        return {"accept": accept, "feedback": str(data.get("feedback", "")).strip()}
+    except Exception:
+        return {"accept": True, "feedback": ""}
+
+
+def _build_critic_system():
+    return (
+        "You are a strict quality checker for a small AI team. You are shown a "
+        "subtask and a worker's output. Judge ONLY whether the output adequately "
+        "and correctly completes that subtask. Reply with EXACTLY ONE JSON object "
+        "and nothing else:\n"
+        '  {"accept": true or false, "feedback": "<one short sentence: what is '
+        'missing or wrong, or why it is fine>"}'
+    )
+
+
+def _build_critic_user(task, worker_name, instruction, output):
+    return (
+        f"OVERALL TASK:\n{task}\n\n"
+        f"SUBTASK given to {worker_name}:\n{instruction}\n\n"
+        f"{worker_name}'s OUTPUT:\n{_short(output, 2000)}\n\n"
+        "Does the output adequately complete the subtask? One JSON object only."
+    )
+
+
 # ── Prompt builders ─────────────────────────────────────────────────────────────--
 
 def _build_manager_system(manager, workers):
@@ -599,6 +666,10 @@ def _render_transcript(transcript):
             lines.append(f'   → {r["to"]} FAILED: {r["error"]} (try another worker or finish)')
         else:
             lines.append(f'   → {r["to"]} returned:\n{_short(r["output"], _TRANSCRIPT_OUTPUT_CAP)}')
+            crit = r.get("critique")
+            if crit and crit.get("feedback"):
+                verdict = "OK" if crit["accept"] else "NEEDS WORK"
+                lines.append(f'   ↳ quality check [{verdict}]: {crit["feedback"]}')
     return "\n".join(lines)
 
 
