@@ -2,7 +2,9 @@
 
 ConnectAI connects AI agents from **different providers** (Groq, Google Gemini, and
 later OpenAI/Anthropic) into a team that collaborates on a shared task — using each
-model for what it's best at.
+model for what it's best at. Two collaboration modes ship today: **round-robin**
+(agents take turns on a shared scratchpad) and **Manager mode** (a lead agent
+delegates subtasks to workers and synthesises the final answer).
 
 ## ⚠️ Read this first
 - The user is a **university student in Stockholm, a beginner coder with no real coding
@@ -38,10 +40,11 @@ answer (lead decides, workers advise). Reliability is the whole point:
 - **The loop is a generator** `run_manager(...)` yielding events (start / manager_decision /
   worker_result / critique / guardrail / synthesis / final). ONE loop feeds the CLI, the UI
   timeline, and the tests; `run_manager_collect()` drains it for CLI/tests.
-- **Guardrails** (each force-tested): `max_steps`, `max_cost_usd` (checked before every call;
-  on cost-cap it assembles the answer from the transcript with NO extra paid call),
-  `max_calls_per_worker`, no-progress/stall (duplicate instruction or empty output). It
-  ALWAYS ends with a non-empty answer.
+- **Guardrails** (each force-tested; defaults: `max_steps=12`, `max_cost_usd=0.50`,
+  `max_retries=3`, `max_calls_per_worker=4`, `stall_limit=2`): the dollar cap is checked
+  before every call and, when hit, assembles the answer from the transcript with NO extra
+  paid call; no-progress/stall = duplicate instruction or empty worker output. It ALWAYS
+  ends with a non-empty answer.
 - **Context discipline**: lead + workers run statelessly via `providers.ask` over a compact
   transcript WE build (not `Agent.history`), so cost stays bounded.
 - **Optional critic** (`use_critic`, default off): one bounded quality pass per worker output;
