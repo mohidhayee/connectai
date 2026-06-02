@@ -26,6 +26,8 @@ model for what it's best at.
   (design sketch below). Deferred: it's a real feature deserving a fresh session.
 
 ## Manager mode (next big feature — design sketch for a fresh session)
+**📋 Full build brief:** `~/.claude/plans/manager-mode-brief.md` — read it first; it has the
+detailed plan (manager loop, structured-JSON decisions, guardrails, incremental build + tests).
 Today agents take fixed round-robin turns over a shared scratchpad (`orchestrator.run`).
 The next step the user wants: a **manager/supervisor pattern** (not free-for-all chatter,
 which is messier + burns tokens). Plan:
