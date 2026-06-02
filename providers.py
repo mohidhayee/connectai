@@ -11,6 +11,7 @@ is read from the matching environment variable in .env.
 """
 
 import os
+import time
 from dotenv import load_dotenv
 import litellm
 
@@ -24,9 +25,23 @@ load_dotenv(override=True)          # load API keys from .env
 # Running total of estimated USD spent since the program started.
 _total_cost = 0.0
 
+# Some failures are transient — rate limits (e.g. Groq's free tokens-per-minute
+# cap), brief outages, timeouts — and clear if we wait a moment. We retry those a
+# couple of times with a short backoff before giving up. Persistent errors (bad
+# key, bad request) aren't in this set, so they fail fast. We match on the
+# exception's class NAME to stay robust across litellm versions.
+_RETRYABLE_ERRORS = {"RateLimitError", "ServiceUnavailableError", "Timeout",
+                     "APIConnectionError", "InternalServerError"}
+_RETRY_BACKOFF = (2, 6)   # seconds to wait before each retry; length = max retries
+
 
 class ProviderError(Exception):
     """Raised when a model/provider isn't configured correctly or a call fails."""
+
+
+def _is_retryable(exc):
+    """True if this looks like a transient error worth retrying after a wait."""
+    return type(exc).__name__ in _RETRYABLE_ERRORS
 
 
 def provider_for(model):
@@ -85,10 +100,19 @@ def ask(prompt=None, *, model, system=None, messages=None, api_key=None):
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
-    try:
-        response = litellm.completion(model=model, messages=messages, api_key=key)
-    except Exception as e:
-        raise ProviderError(f"'{model}' call failed: {str(e).splitlines()[0]}")
+    # Call the model, retrying transient errors (rate limits, brief outages) with a
+    # short backoff. Anything non-transient — or a transient error that won't clear
+    # within our retries — is wrapped as a ProviderError for callers to handle.
+    response = None
+    for attempt in range(len(_RETRY_BACKOFF) + 1):
+        try:
+            response = litellm.completion(model=model, messages=messages, api_key=key)
+            break
+        except Exception as e:
+            if attempt < len(_RETRY_BACKOFF) and _is_retryable(e):
+                time.sleep(_RETRY_BACKOFF[attempt])
+                continue
+            raise ProviderError(f"'{model}' call failed: {str(e).splitlines()[0]}")
 
     # litellm attaches an estimated USD cost to most responses (may be 0 for
     # models it has no pricing data for).

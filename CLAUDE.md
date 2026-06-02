@@ -25,7 +25,8 @@ delegates subtasks to workers and synthesises the final answer).
 - ✅ **Manager mode** — `manager.py`: a lead agent delegates subtasks + synthesises the final
   answer, with structured-JSON decisions, retries, step/cost/per-worker/no-progress caps,
   graceful always-an-answer termination, an optional 1-pass critic, and a live UI timeline.
-  Round-robin kept fully working. Tests: `test_manager.py` (35 offline) + `test_app.py` (3).
+  Round-robin kept fully working. Tests: `test_manager.py` (36 offline) + `test_app.py`
+  (3) + offline retry tests in `test_providers.py`.
 - ⏭️ **NEXT → Phase 5** — add a README screenshot (TODO marker is in `README.md`); deploy
   free demo to Streamlit Community Cloud; user posts to ≥3 communities (needs user accounts).
 
@@ -44,7 +45,10 @@ answer (lead decides, workers advise). Reliability is the whole point:
   `max_retries=3`, `max_calls_per_worker=4`, `stall_limit=2`): the dollar cap is checked
   before every call and, when hit, assembles the answer from the transcript with NO extra
   paid call; no-progress/stall = duplicate instruction or empty worker output. It ALWAYS
-  ends with a non-empty answer.
+  ends with a non-empty answer. `finish_reason` is one of `manager_finished` / `max_steps` /
+  `cost_cap` / `stalled` / `parse_failures` / `provider_error` (a model error such as a rate
+  limit that outlived `providers.ask`'s retries) — `cost_cap` and `provider_error` both
+  assemble deterministically rather than make a doomed extra call.
 - **Context discipline**: lead + workers run statelessly via `providers.ask` over a compact
   transcript WE build (not `Agent.history`), so cost stays bounded.
 - **Optional critic** (`use_critic`, default off): one bounded quality pass per worker output;
@@ -73,8 +77,10 @@ streamlit run app.py                       # web UI (mode switch, BYO keys, 2–
   list per provider, each `{id,label,strength}`). **Add/retire models only here.**
 - `providers.py` — `ask(prompt, *, model, system=None, messages=None, api_key=None)` is the
   ONE way to call any model. Provider is inferred from the model id (`provider_for`); key is
-  the passed `api_key` else the provider's env var. Tracks cost via `total_cost()`. Never
-  call litellm directly elsewhere.
+  the passed `api_key` else the provider's env var. Tracks cost via `total_cost()`. **Retries
+  transient errors** (rate limits like Groq's free TPM cap, brief outages, timeouts) with a
+  short backoff (`_RETRY_BACKOFF`) before raising `ProviderError`; non-transient errors fail
+  fast. Never call litellm directly elsewhere.
 - `agent.py` — `Agent(name, model, role, api_key=None)`; `.provider` is derived from model.
 - `orchestrator.py` — `run(agents_list, task, max_turns)`; round-robin over 2–4 agents; an
   agent may only signal DONE at the end of a full round (`turn>=n and turn%n==0`).

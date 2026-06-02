@@ -306,11 +306,13 @@ def run_manager(manager, workers, task, *,
         decision = result["decision"]
         yield {"type": "manager_decision", "step": steps_used, "decision": decision,
                "raw": result["raw"], "attempts": result["attempts"],
-               "error": result["error"], "cost": providers.total_cost()}
+               "error": result["error"], "provider_error": result.get("provider_error", False),
+               "cost": providers.total_cost()}
 
-        # 2. Couldn't get a valid decision after all retries → stop gracefully.
+        # 2. Couldn't get a valid decision → stop gracefully. Report the TRUE cause:
+        #    a provider error (e.g. rate limit) vs the lead returning bad JSON.
         if decision is None:
-            finish_reason = "parse_failures"
+            finish_reason = "provider_error" if result.get("provider_error") else "parse_failures"
             break
 
         # 3. Manager says we're done — take its answer as the final answer.
@@ -399,8 +401,10 @@ def run_manager(manager, workers, task, *,
     #    from whatever work exists. This is the always-terminate guarantee.
     if final_answer is None:
         yield {"type": "synthesis", "reason": finish_reason}
-        if finish_reason == "cost_cap":
-            # We're over budget — assemble deterministically, NO extra paid call.
+        if finish_reason in ("cost_cap", "provider_error"):
+            # Either we're over budget, or the lead's provider is failing — in both
+            # cases another model call is wrong (it'd overspend or just fail again),
+            # so assemble the answer deterministically from the work already done.
             final_answer = _best_effort_from_transcript(transcript)
         else:
             final_answer = synthesize(manager, task, transcript, reason=finish_reason)
@@ -426,11 +430,14 @@ def run_manager_collect(manager, workers, task, **kwargs):
 def decide(manager, task, transcript, workers, *, max_retries=DEFAULT_MAX_RETRIES):
     """Ask the Manager for its next decision and validate it.
 
-    Returns a dict: {"decision", "raw", "attempts", "error"}.
+    Returns a dict: {"decision", "raw", "attempts", "error", "provider_error"}.
       - decision: a validated decision dict, or None if every attempt failed.
       - raw:      the Manager's last raw reply (for the UI / debugging).
       - attempts: how many model calls it took.
       - error:    the last error message, if any.
+      - provider_error: True if the failure was the model PROVIDER erroring (e.g. a
+                  rate limit that outlived providers.ask's own retries) rather than
+                  malformed JSON. Lets callers report the true cause.
 
     On malformed JSON we feed the parser's (human-readable) error back to the
     Manager and ask again, up to max_retries. If it still can't comply, we return
@@ -451,13 +458,16 @@ def decide(manager, task, transcript, workers, *, max_retries=DEFAULT_MAX_RETRIE
             raw = providers.ask(prompt=user, model=manager.model,
                                 system=system, api_key=manager.api_key)
         except providers.ProviderError as e:
-            # The provider itself failed (bad key, network, etc.). Retrying the
-            # exact same call rarely helps, so stop and let the caller synthesise.
-            return {"decision": None, "raw": "", "attempts": attempt, "error": str(e)}
+            # The provider failed even after providers.ask's own transient-error
+            # retries — so it's persistent (bad key, sustained rate limit, outage).
+            # Stop and let the caller fall back, flagging the true cause.
+            return {"decision": None, "raw": "", "attempts": attempt,
+                    "error": str(e), "provider_error": True}
 
         try:
             decision = parse_decision(raw, valid_workers=worker_names)
-            return {"decision": decision, "raw": raw, "attempts": attempt, "error": None}
+            return {"decision": decision, "raw": raw, "attempts": attempt,
+                    "error": None, "provider_error": False}
         except DecisionParseError as e:
             last_error = str(e)
             feedback = (
@@ -465,7 +475,8 @@ def decide(manager, task, transcript, workers, *, max_retries=DEFAULT_MAX_RETRIE
                 "Reply with ONLY one valid JSON object — no prose, no code fences."
             )
 
-    return {"decision": None, "raw": raw, "attempts": max_retries, "error": last_error}
+    return {"decision": None, "raw": raw, "attempts": max_retries,
+            "error": last_error, "provider_error": False}
 
 
 # ── Running a worker (stateless, curated context) ───────────────────────────────--

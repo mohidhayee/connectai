@@ -203,13 +203,21 @@ guardrail below was implemented **and then tested by deliberately triggering it*
 | Going in circles | **No-progress / stall** (duplicate instruction or empty worker output) | `stall_limit = 2` |
 | Malformed lead output | **Parser + retries**, then graceful fallback | `max_retries = 3` |
 | A worker's API failing | Error captured into the transcript, loop continues | — |
+| A transient provider error (rate limit, brief outage) | **Retried with backoff** at the `providers.ask` layer; if it persists, reported as `provider_error` | — |
 
 Two details that matter:
 
-- **The cost cap never spends to honor "always answer."** If the dollar cap is what
-  stops a run, the final answer is assembled **deterministically from the transcript
-  with no extra paid call**. Every *other* forced stop gets a proper LLM synthesis
-  pass (we still have budget).
+- **The cost cap never spends to honor "always answer."** If the dollar cap (or a
+  persistent provider error) is what stops a run, the final answer is assembled
+  **deterministically from the transcript with no extra paid call** — making another
+  model call would just overspend or fail again. Every *other* forced stop gets a
+  proper LLM synthesis pass (we still have budget).
+- **Honest finish reasons.** A run reports *why* it ended — and a provider failure
+  (e.g. a rate limit) is labelled `provider_error`, not lumped in with malformed-JSON
+  `parse_failures`. (A real lesson: free-tier rate limits, like Groq's
+  tokens-per-minute cap, are common enough on long runs that both the retry and the
+  honest label earned their place — transient ones are retried, persistent ones are
+  named correctly.)
 - **The cardinal guarantee:** a run *always* ends with a non-empty `final` event —
   even if the lead misbehaves, a worker crashes, and a cap trips, all at once.
 

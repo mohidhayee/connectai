@@ -144,7 +144,13 @@ def manager_timeline(manager, workers, task, *, max_steps, max_cost, use_critic,
                     _agent_head(manager.name, manager.model,
                                 f"Manager · step {steps}/{max_steps}")
                     d = ev["decision"]
-                    if d is None:
+                    if d is None and ev.get("provider_error"):
+                        st.warning(
+                            f"The lead's model provider errored (e.g. rate limit): "
+                            f"{ev['error']} — falling back to a best-effort answer from "
+                            "the work so far."
+                        )
+                    elif d is None:
                         st.warning(
                             f"Couldn't get a valid decision after {ev['attempts']} "
                             f"tries ({ev['error']}). Falling back to a best-effort answer."
@@ -498,6 +504,7 @@ with tab_run:
                 "cost_cap": "⛔ hit the cost cap",
                 "stalled": "⛔ no further progress",
                 "parse_failures": "⛔ manager output couldn't be parsed",
+                "provider_error": "⛔ a model provider errored (e.g. rate limit)",
                 "no_workers": "no workers configured",
             }.get(finish_reason, str(finish_reason))
             st.caption(f"Ended: {reason_label}  ·  {steps} steps  ·  ${total_cost():.4f}")

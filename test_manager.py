@@ -359,6 +359,28 @@ def test_guardrails():
         assert fp.calls["worker"] == 1, fp.calls
     check("cost cap (mid-run) → stop, assemble from work, no extra paid call", cost_cap_midrun)
 
+    # (h) The lead's PROVIDER failing (e.g. a rate limit) is reported as
+    #     'provider_error' (not mislabeled 'parse_failures'), still answers from the
+    #     work done, and makes no doomed synth call.
+    def provider_error():
+        manager, workers = _team(["Writer"])
+
+        def mgr(n):
+            if n == 1:
+                return _delegate("Writer", "do x")
+            raise providers.ProviderError("simulated rate limit")
+
+        fp = FakeProvider(mgr, worker_reply="PARTIAL WORK")
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task")
+        f = assert_answered(events, "provider_error")
+        assert f["finish_reason"] == "provider_error", f["finish_reason"]
+        assert "PARTIAL WORK" in f["answer"], f["answer"]    # assembled from work done
+        assert fp.calls["synth"] == 0, "made a synth call despite a failing provider"
+        last_decision = [e for e in events if e["type"] == "manager_decision"][-1]
+        assert last_decision["provider_error"] is True, last_decision
+    check("lead provider error → labeled provider_error, answers, no synth call", provider_error)
+
 
 # ── OPTIONAL CRITIC: one bounded pass, default off, fails open ─────────────────--
 
