@@ -14,9 +14,13 @@ messy, malformed things a real model might say at the parser and prove it either
 DecisionParseError — never an unexpected crash that would derail the control loop.
 """
 
+import contextlib
+import json
 import sys
 
-from manager import parse_decision, DecisionParseError
+import providers
+from agent import Agent
+from manager import parse_decision, DecisionParseError, run_manager_collect
 
 # ── Tiny test harness ─────────────────────────────────────────────────────────--
 _passed = 0
@@ -159,15 +163,208 @@ def test_malformed_inputs():
           lambda: expect_error("{'action': 'finish', 'final_answer': 'hi'}"))
 
 
+# ── A deterministic, offline stand-in for the providers module ─────────────────--
+# So the guardrail tests force each failure mode with ZERO network calls and ZERO
+# spend. We swap in fake versions of providers.ask and providers.total_cost, then
+# script exactly what the "manager" and "workers" say.
+
+class FakeProvider:
+    """Scripted replacement for providers.ask / providers.total_cost.
+
+    It tells apart the three kinds of call by the system prompt:
+      - manager decision  → system contains "LEAD of a small AI team"
+      - final synthesis    → system contains "delivering the FINAL answer"
+      - otherwise          → a worker call
+    """
+
+    def __init__(self, manager_replies, *, worker_reply="WORKER OUTPUT",
+                 synth_reply="SYNTHESISED ANSWER", fail_workers=False,
+                 cost_per_call=0.0, start_cost=0.0):
+        # manager_replies may be a list (consumed in order, last repeats) or a
+        # callable taking the 1-based call number and returning a reply string.
+        self.manager_replies = manager_replies
+        self.worker_reply = worker_reply
+        self.synth_reply = synth_reply
+        self.fail_workers = fail_workers
+        self.cost_per_call = cost_per_call
+        self.cost = start_cost
+        self.calls = {"manager": 0, "worker": 0, "synth": 0}
+
+    def ask(self, prompt=None, *, model, system=None, messages=None, api_key=None):
+        self.cost += self.cost_per_call
+        if system and "LEAD of a small AI team" in system:
+            self.calls["manager"] += 1
+            n = self.calls["manager"]
+            if callable(self.manager_replies):
+                return self.manager_replies(n)
+            seq = self.manager_replies
+            return seq[n - 1] if n - 1 < len(seq) else seq[-1]
+        if system and "delivering the FINAL answer" in system:
+            self.calls["synth"] += 1
+            return self.synth_reply
+        self.calls["worker"] += 1
+        if self.fail_workers:
+            raise providers.ProviderError("simulated worker failure")
+        return self.worker_reply(prompt) if callable(self.worker_reply) else self.worker_reply
+
+    def total_cost(self):
+        return self.cost
+
+
+@contextlib.contextmanager
+def patched(fp):
+    """Temporarily route providers.ask / providers.total_cost through the fake."""
+    real_ask, real_cost = providers.ask, providers.total_cost
+    providers.ask, providers.total_cost = fp.ask, fp.total_cost
+    try:
+        yield
+    finally:
+        providers.ask, providers.total_cost = real_ask, real_cost
+
+
+def _team(worker_names=("Writer",)):
+    """A Lead + workers. The model id is irrelevant — providers.ask is faked."""
+    model = "groq/llama-3.3-70b-versatile"
+    manager = Agent("Lead", model, role="(set by manager mode)")
+    workers = [Agent(n, model, role=f"You are {n}. Do your job.") for n in worker_names]
+    return manager, workers
+
+
+def _delegate(to, instruction, reason="needed"):
+    return json.dumps({"action": "delegate", "to": to,
+                       "instruction": instruction, "reason": reason})
+
+
+def _finish(answer):
+    return json.dumps({"action": "finish", "final_answer": answer})
+
+
+def _guardrail_names(events):
+    return [e["name"] for e in events if e["type"] == "guardrail"]
+
+
+def _final(events):
+    return next((e for e in reversed(events) if e["type"] == "final"), None)
+
+
+# ── GUARDRAILS: force each failure mode and prove graceful termination ─────────--
+
+def test_guardrails():
+    print("\nGUARDRAILS (each failure mode forced on purpose; offline + free):")
+
+    def assert_answered(events, why):
+        """The universal guarantee: a run ALWAYS ends with a non-empty answer."""
+        f = _final(events)
+        assert f is not None, f"{why}: no final event"
+        assert isinstance(f["answer"], str) and f["answer"].strip(), f"{why}: empty answer"
+        return f
+
+    # (a) Infinite delegation is stopped by the step cap (then we still answer).
+    def step_cap():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider(lambda n: _delegate("Writer", f"do part {n}"))
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task",
+                                            max_steps=3, max_calls_per_worker=99,
+                                            stall_limit=99)
+        f = assert_answered(events, "step_cap")
+        assert f["finish_reason"] == "max_steps", f["finish_reason"]
+        assert f["steps"] == 3, f["steps"]
+        assert fp.calls["worker"] == 3, fp.calls
+        assert f["answer"] == "SYNTHESISED ANSWER", f["answer"]
+    check("infinite delegation → stopped by step cap, still answers", step_cap)
+
+    # (b) Always-malformed Manager JSON → retries exhausted → graceful synth.
+    def parse_failures():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider(lambda n: "this is not json at all")
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task", max_retries=3)
+        f = assert_answered(events, "parse_failures")
+        assert f["finish_reason"] == "parse_failures", f["finish_reason"]
+        assert f["steps"] == 1, f["steps"]
+        assert fp.calls["manager"] == 3, fp.calls   # retried exactly max_retries
+        dec = next(e for e in events if e["type"] == "manager_decision")
+        assert dec["attempts"] == 3 and dec["decision"] is None, dec
+    check("always-malformed JSON → retries exhausted → graceful answer", parse_failures)
+
+    # (c) A worker crash is captured; the loop survives and the Manager finishes.
+    def worker_error():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider([_delegate("Writer", "do x"), _finish("FINAL FROM MANAGER")],
+                          fail_workers=True)
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task")
+        f = assert_answered(events, "worker_error")
+        wr = next(e for e in events if e["type"] == "worker_result")
+        assert wr["error"], "worker error not recorded"
+        assert wr["output"] == "", wr["output"]
+        assert f["answer"] == "FINAL FROM MANAGER", f["answer"]
+        assert f["finish_reason"] == "manager_finished", f["finish_reason"]
+    check("worker crash → captured, loop survives, Manager still finishes", worker_error)
+
+    # (d) Repeating the same subtask is caught as no-progress and stops.
+    def duplicate_stall():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider(lambda n: _delegate("Writer", "same exact task"))
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task", max_steps=10,
+                                            stall_limit=2, max_calls_per_worker=10)
+        f = assert_answered(events, "duplicate_stall")
+        assert f["finish_reason"] == "stalled", f["finish_reason"]
+        assert "duplicate" in _guardrail_names(events), _guardrail_names(events)
+        assert fp.calls["worker"] == 1, fp.calls    # only the first one ran
+    check("duplicate subtask → no-progress stall → graceful answer", duplicate_stall)
+
+    # (e) Hammering one worker is capped.
+    def worker_cap():
+        manager, workers = _team(["Writer", "Reader"])
+        fp = FakeProvider(lambda n: _delegate("Writer", f"unique {n}"))
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task", max_steps=10,
+                                            max_calls_per_worker=2, stall_limit=2)
+        assert_answered(events, "worker_cap")
+        assert "worker_cap" in _guardrail_names(events), _guardrail_names(events)
+        assert fp.calls["worker"] == 2, fp.calls    # capped at 2 real calls
+    check("per-worker cap → lead can't hammer one worker, still answers", worker_cap)
+
+    # (f) Cost cap already exceeded before we start → stop immediately, no calls.
+    def cost_cap_upfront():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider(lambda n: _delegate("Writer", "x"), start_cost=1.0)
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task", max_cost_usd=0.10)
+        f = assert_answered(events, "cost_cap_upfront")
+        assert f["finish_reason"] == "cost_cap", f["finish_reason"]
+        assert fp.calls["manager"] == 0 and fp.calls["synth"] == 0, fp.calls
+        assert "cost_cap" in _guardrail_names(events), _guardrail_names(events)
+    check("cost cap (already over) → stop before spending, still answers", cost_cap_upfront)
+
+    # (g) Cost cap crossed mid-run → stop, assemble from work done, NO paid synth.
+    def cost_cap_midrun():
+        manager, workers = _team(["Writer"])
+        fp = FakeProvider(lambda n: _delegate("Writer", f"part {n}"),
+                          worker_reply="WORKER SAYS HELLO", cost_per_call=0.06)
+        with patched(fp):
+            _, events = run_manager_collect(manager, workers, "task", max_cost_usd=0.10)
+        f = assert_answered(events, "cost_cap_midrun")
+        assert f["finish_reason"] == "cost_cap", f["finish_reason"]
+        assert "WORKER SAYS HELLO" in f["answer"], f["answer"]   # built from transcript
+        assert fp.calls["synth"] == 0, "made a paid synth call while over budget!"
+        assert fp.calls["worker"] == 1, fp.calls
+    check("cost cap (mid-run) → stop, assemble from work, no extra paid call", cost_cap_midrun)
+
+
 # ── Run everything ──────────────────────────────────────────────────────────────
 
 def main():
     print("=" * 62)
-    print("Manager Mode tests — Step 1: the decision parser")
+    print("Manager Mode tests — parser + loop guardrails (all offline)")
     print("=" * 62)
 
     test_valid_inputs()
     test_malformed_inputs()
+    test_guardrails()
 
     print("\n" + "=" * 62)
     total = _passed + _failed

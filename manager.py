@@ -41,8 +41,11 @@ import providers
 
 
 # ── Tunables (the safety limits live here; the loop reads these) ─────────────────
-DEFAULT_MAX_STEPS = 12       # hard cap on Manager decisions in one run
-DEFAULT_MAX_RETRIES = 3      # how many times to re-ask after malformed JSON
+DEFAULT_MAX_STEPS = 12               # hard cap on Manager decisions in one run
+DEFAULT_MAX_COST_USD = 0.50          # hard $ cap; checked before every model call
+DEFAULT_MAX_RETRIES = 3              # how many times to re-ask after malformed JSON
+DEFAULT_MAX_CALLS_PER_WORKER = 4     # stop the lead hammering one worker in a loop
+DEFAULT_STALL_LIMIT = 2              # consecutive no-progress steps before we stop
 
 # When showing the Manager the work so far, cap each worker output so the prompt
 # (and cost) stays bounded as the transcript grows. Full outputs are still kept
@@ -200,6 +203,24 @@ def _match_worker(name, workers):
     return None
 
 
+def _normalize_instruction(text):
+    """Lower-case and collapse whitespace, so trivially different phrasings of the
+    same subtask are recognised as duplicates (no-progress detection)."""
+    return " ".join((text or "").lower().split())
+
+
+def _guardrail(name, step, detail):
+    """Build a 'guardrail' event — a safety limit firing — for the UI/CLI/tests."""
+    return {"type": "guardrail", "name": name, "step": step, "detail": detail}
+
+
+def _note(step, to, instruction, reason, message):
+    """A synthetic transcript record (no worker actually ran) recording WHY a
+    delegate was refused, so the Manager sees it and adjusts next turn."""
+    return {"step": step, "to": to, "instruction": instruction, "reason": reason,
+            "output": "", "error": message}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # THE MANAGER LOOP
 # ══════════════════════════════════════════════════════════════════════════════
@@ -216,36 +237,47 @@ def _match_worker(name, workers):
 
 def run_manager(manager, workers, task, *,
                 max_steps=DEFAULT_MAX_STEPS,
-                max_retries=DEFAULT_MAX_RETRIES):
+                max_cost_usd=DEFAULT_MAX_COST_USD,
+                max_retries=DEFAULT_MAX_RETRIES,
+                max_calls_per_worker=DEFAULT_MAX_CALLS_PER_WORKER,
+                stall_limit=DEFAULT_STALL_LIMIT):
     """Run Manager Mode on a task, yielding events as they happen.
 
     Args:
-        manager:      the lead Agent (coordinates; never writes worker content).
-        workers:      list of worker Agents the lead can delegate to (>= 1).
-        task:         the user's task, as plain text.
-        max_steps:    hard cap on Manager decisions (anti-infinite-loop).
-        max_retries:  re-asks allowed when the Manager returns malformed JSON.
+        manager:               the lead Agent (coordinates; never writes content).
+        workers:               worker Agents the lead can delegate to (>= 1).
+        task:                  the user's task, as plain text.
+        max_steps:             hard cap on Manager decisions (anti-infinite-loop).
+        max_cost_usd:          hard $ cap; checked before each model call.
+        max_retries:           re-asks allowed on malformed Manager JSON.
+        max_calls_per_worker:  cap on how often one worker can be used.
+        stall_limit:           consecutive no-progress steps before we force-stop.
 
     Yields dicts with a "type":
         start            — run is beginning (manager, workers, task, caps)
         manager_decision — the Manager decided (decision, raw, attempts, error)
         worker_result    — a worker replied (worker, output, error, cost)
+        guardrail        — a safety limit fired (name, detail) — observable!
         synthesis        — we're building a best-effort answer after a forced stop
         final            — the final answer (answer, finish_reason, steps, cost)
 
     The run ALWAYS ends with a "final" event carrying a non-empty answer — even
     if the Manager misbehaves, a worker fails, or a cap trips. That guarantee is
-    the whole point.
+    the whole point. Each guardrail below is paired with a forced test in
+    test_manager.py.
     """
     worker_by_name = {w.name: w for w in workers}
-    worker_names = list(worker_by_name)
-    transcript = []          # list of delegation records (see _run_worker)
+    transcript = []                              # delegation records (see _run_worker)
+    worker_calls = {w.name: 0 for w in workers}  # per-worker call counter
+    seen_instructions = set()                    # (worker, normalised instruction)
     steps_used = 0
+    stall = 0                                    # consecutive no-progress steps
     finish_reason = None
     final_answer = None
 
-    yield {"type": "start", "manager": manager.name, "workers": worker_names,
-           "task": task, "max_steps": max_steps}
+    yield {"type": "start", "manager": manager.name, "workers": list(worker_by_name),
+           "task": task, "max_steps": max_steps, "max_cost_usd": max_cost_usd,
+           "max_calls_per_worker": max_calls_per_worker}
 
     # Defensive: no workers means nothing to coordinate. Don't crash — finish.
     if not workers:
@@ -255,6 +287,13 @@ def run_manager(manager, workers, task, *,
         return
 
     while steps_used < max_steps:
+        # GUARDRAIL: dollar cap. A Manager call itself costs money, so check first.
+        if providers.total_cost() >= max_cost_usd:
+            finish_reason = "cost_cap"
+            yield _guardrail("cost_cap", steps_used,
+                             f"cost ${providers.total_cost():.4f} reached cap ${max_cost_usd:.2f}")
+            break
+
         steps_used += 1
 
         # 1. Ask the Manager for its next decision (validated JSON, with retries).
@@ -264,7 +303,7 @@ def run_manager(manager, workers, task, *,
                "raw": result["raw"], "attempts": result["attempts"],
                "error": result["error"], "cost": providers.total_cost()}
 
-        # 2. If we couldn't get a valid decision after all retries, stop gracefully.
+        # 2. Couldn't get a valid decision after all retries → stop gracefully.
         if decision is None:
             finish_reason = "parse_failures"
             break
@@ -275,27 +314,80 @@ def run_manager(manager, workers, task, *,
             finish_reason = "manager_finished"
             break
 
-        # 4. Otherwise it's a delegate: run that worker and record the result.
-        worker = worker_by_name[decision["to"]]   # name was validated in parse
-        output, error = _run_worker(worker, task, decision["instruction"], transcript)
+        # ── It's a delegate. Run the no-progress guardrails BEFORE spending on it.
+        name = decision["to"]               # already validated to a real worker
+        instruction = decision["instruction"]
+
+        # GUARDRAIL: per-worker call cap. Don't let the lead hammer one worker.
+        if worker_calls[name] >= max_calls_per_worker:
+            stall += 1
+            yield _guardrail("worker_cap", steps_used,
+                             f"{name} hit its call cap ({max_calls_per_worker})")
+            transcript.append(_note(steps_used, name, instruction, decision["reason"],
+                                    f"{name} has reached its call limit "
+                                    f"({max_calls_per_worker}). Pick another worker or finish."))
+            if stall >= stall_limit:
+                finish_reason = "stalled"
+                break
+            continue
+
+        # GUARDRAIL: no-progress / duplicate instruction.
+        key = (name.lower(), _normalize_instruction(instruction))
+        if key in seen_instructions:
+            stall += 1
+            yield _guardrail("duplicate", steps_used,
+                             f"repeat subtask to {name} — no new progress")
+            transcript.append(_note(steps_used, name, instruction, decision["reason"],
+                                    "This exact subtask was already requested. "
+                                    "Do something new or finish."))
+            if stall >= stall_limit:
+                finish_reason = "stalled"
+                break
+            continue
+        seen_instructions.add(key)
+
+        # GUARDRAIL: dollar cap again — the decide() call may have pushed us over.
+        if providers.total_cost() >= max_cost_usd:
+            finish_reason = "cost_cap"
+            yield _guardrail("cost_cap", steps_used,
+                             f"cost ${providers.total_cost():.4f} reached cap ${max_cost_usd:.2f}")
+            break
+
+        # 4. Run the worker and record the result.
+        worker = worker_by_name[name]
+        output, error = _run_worker(worker, task, instruction, transcript)
+        worker_calls[name] += 1
         transcript.append({
-            "step": steps_used, "to": decision["to"],
-            "instruction": decision["instruction"], "reason": decision["reason"],
-            "output": output, "error": error,
+            "step": steps_used, "to": name, "instruction": instruction,
+            "reason": decision["reason"], "output": output, "error": error,
         })
-        yield {"type": "worker_result", "step": steps_used, "worker": decision["to"],
-               "model": worker.model, "instruction": decision["instruction"],
+        yield {"type": "worker_result", "step": steps_used, "worker": name,
+               "model": worker.model, "instruction": instruction,
                "reason": decision["reason"], "output": output, "error": error,
                "cost": providers.total_cost()}
+
+        # Track progress: a worker that returns real content resets the stall
+        # counter; an empty reply counts as a stall (no-progress).
+        if error or not output.strip():
+            stall += 1
+            if stall >= stall_limit:
+                finish_reason = "stalled"
+                break
+        else:
+            stall = 0
     else:
         # while-loop ran the full count without a break → we hit the step cap.
         finish_reason = "max_steps"
 
-    # 5. If the Manager never produced a final answer (a forced stop), synthesise
-    #    one from whatever work exists. This is the always-terminate guarantee.
+    # 5. If the Manager never produced a final answer (any forced stop), build one
+    #    from whatever work exists. This is the always-terminate guarantee.
     if final_answer is None:
         yield {"type": "synthesis", "reason": finish_reason}
-        final_answer = synthesize(manager, task, transcript, reason=finish_reason)
+        if finish_reason == "cost_cap":
+            # We're over budget — assemble deterministically, NO extra paid call.
+            final_answer = _best_effort_from_transcript(transcript)
+        else:
+            final_answer = synthesize(manager, task, transcript, reason=finish_reason)
 
     yield {"type": "final", "answer": final_answer, "finish_reason": finish_reason,
            "steps": steps_used, "cost": providers.total_cost()}
