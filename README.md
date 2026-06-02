@@ -17,10 +17,29 @@ It's a small, hand-rolled, open-source experiment in cross-vendor AI collaborati
 - **Mix providers and models.** Pick any model per agent from a curated list (with
   "what it's best at" tags) — or type any custom model id. Combine their strengths.
 - **2–4 agents.** Add up to four collaborators that take turns on a shared scratchpad.
+- **Two collaboration modes.** *Round-robin* (agents take turns) or **Manager mode** — a
+  lead agent delegates subtasks to the others and synthesises the final answer, with every
+  decision shown live and hard caps on steps and cost.
 - **Bring your own keys.** Paste your own API keys; they live only in your browser
   session — never saved to disk, never logged. You pay your providers directly.
 - **Live cost meter.** See exactly what each run costs (often a fraction of a cent).
 - **Runs free.** Groq's free tier means you can try the whole thing for $0.
+
+## Two ways to collaborate
+
+- **🔁 Round-robin** — agents take turns adding to a shared scratchpad until the work is
+  done. Simple, and great for drafting and refining together.
+- **🧭 Manager mode** — one agent is the **lead**: it reads the task, **delegates** focused
+  subtasks to the workers, then **synthesises** their work into one final answer. It's built
+  for reliability, not just demos:
+  - the lead's decisions are **structured JSON** (validated, with automatic retries),
+  - every run has a **step cap *and* a dollar cap**,
+  - repeated/duplicate work and stalls are detected and stopped,
+  - it **always returns a best-effort answer**, even if a worker fails or a cap trips,
+  - and every decision, delegation and guardrail is shown **live**, so you can see *how* the
+    team worked (an optional one-pass quality critic can review each worker's output too).
+
+  Pick the mode — and which agent is the lead — in the **Team** tab.
 
 ## Quickstart
 
@@ -42,6 +61,7 @@ streamlit run app.py
 
 # 3b. ...or run it in the terminal
 python run.py "write a short guide to staying focused while studying"
+python run.py --manager "plan a balanced 3-day Stockholm itinerary"   # manager mode
 ```
 
 **Bring your own keys.** In the web app, paste keys in the sidebar — they're kept in
@@ -58,6 +78,7 @@ Small, readable files, each with one job:
 | `providers.py` | The universal translator — one `ask(model=...)` calls any model (via `litellm`), tracks cost, resolves the API key (yours or from `.env`). |
 | `agent.py` | One team member — an `Agent` has a name, a model, a role, an optional key, and its own memory. |
 | `orchestrator.py` | The chairperson — runs the round-robin over 2–4 agents on a shared scratchpad. |
+| `manager.py` | The lead — Manager mode's delegate → work → synthesise loop: JSON decisions, retries, and every safety cap (steps, cost, per-worker, no-progress). |
 | `app.py` / `run.py` | The two front doors — a Streamlit web UI and a terminal CLI. |
 
 It's deliberately hand-rolled (no agent frameworks) so the logic stays readable and
@@ -71,7 +92,8 @@ through the same interface.
 - [x] **Phase 2** — Two-agent collaboration engine
 - [x] **Phase 3** — Streamlit web UI
 - [x] **Phase 4** — Open-source launch prep (docs, MIT license)
-- [ ] **Phase 4.5** — BYO keys · per-model picker · 2–4 agents *(you're looking at it)*
+- [x] **Phase 4.5** — BYO keys · per-model picker · 2–4 agents
+- [x] **Manager mode** — a lead delegates + synthesises; structured, cost-capped, reliable *(you're looking at it)*
 - [ ] **Phase 5** — Live demo, share, listen, iterate
 
 ## Contributing & feedback

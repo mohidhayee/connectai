@@ -290,17 +290,17 @@ with tab_team:
         )
         if mode == "Manager":
             agent_ids = [c["id"] for c in st.session_state.agents]
+            # A plain local map (id -> name). Kept out of st.session_state so the
+            # selectbox's format_func stays pure — Streamlit's test harness calls
+            # it outside a script run, where touching session_state would error.
+            id_to_name = {c["id"]: (c["name"] or "Agent") for c in st.session_state.agents}
             # Reset the stored lead if it points at a removed agent (avoids a crash).
             if st.session_state.get("lead_choice") not in agent_ids:
                 st.session_state.lead_choice = agent_ids[0]
 
-            def _lead_label(aid):
-                c = next(c for c in st.session_state.agents if c["id"] == aid)
-                return f"{c['name'] or 'Agent'}"
-
             st.selectbox(
                 "👑 Lead (the Manager)", agent_ids, key="lead_choice",
-                format_func=_lead_label,
+                format_func=lambda aid: id_to_name.get(aid, "Agent"),
                 help="This agent coordinates: it delegates subtasks to the others "
                      "and writes the final answer. In Manager mode its own role "
                      "text is replaced by manager instructions — but its MODEL "

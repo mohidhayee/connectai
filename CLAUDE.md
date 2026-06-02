@@ -20,25 +20,37 @@ model for what it's best at.
 - ✅ **Phase 4** — launch docs: real `README.md`, `LICENSE` (MIT), `.env.example`
 - ✅ **Phase 4.5** — BYO keys + per-model picker (5 providers) + 2–4 agents + tabbed UI.
   All 5 keys (Groq/Gemini/OpenAI/Anthropic/Perplexity) live in `.env` and tested working.
+- ✅ **Manager mode** — `manager.py`: a lead agent delegates subtasks + synthesises the final
+  answer, with structured-JSON decisions, retries, step/cost/per-worker/no-progress caps,
+  graceful always-an-answer termination, an optional 1-pass critic, and a live UI timeline.
+  Round-robin kept fully working. Tests: `test_manager.py` (35 offline) + `test_app.py` (3).
 - ⏭️ **NEXT → Phase 5** — add a README screenshot (TODO marker is in `README.md`); deploy
   free demo to Streamlit Community Cloud; user posts to ≥3 communities (needs user accounts).
-- 🔮 **Future → "Manager mode"** — let agents truly collaborate via a lead/manager agent
-  (design sketch below). Deferred: it's a real feature deserving a fresh session.
 
-## Manager mode (next big feature — design sketch for a fresh session)
-**📋 Full build brief:** `~/.claude/plans/manager-mode-brief.md` — read it first; it has the
-detailed plan (manager loop, structured-JSON decisions, guardrails, incremental build + tests).
-Today agents take fixed round-robin turns over a shared scratchpad (`orchestrator.run`).
-The next step the user wants: a **manager/supervisor pattern** (not free-for-all chatter,
-which is messier + burns tokens). Plan:
-- Designate one agent as **lead** (e.g. agent 1, or a UI toggle / a dedicated "Manager" role).
-- New orchestrator mode: lead reads the task → decides *which* worker does *what* (delegates)
-  → workers reply → lead **synthesizes** the final answer. Lead drives the loop instead of
-  fixed round-robin.
-- Keep the hand-rolled style. Add a mode switch in `orchestrator.py` (round-robin vs manager)
-  and a UI control in the **Team** tab to pick the lead. Watch cost — delegation = more calls.
-- Verify free with Groq + Gemini before using paid models.
+## Manager mode (SHIPPED — `manager.py`)
+A second collaboration mode alongside round-robin. One agent is the **lead**: it reads the
+task, **delegates** one subtask at a time to the best worker, and **synthesises** the final
+answer (lead decides, workers advise). Reliability is the whole point:
+- **Structured JSON decisions** (`parse_decision`): lead replies with `{"action":"delegate",
+  "to","instruction","reason"}` or `{"action":"finish","final_answer"}`. The parser strips
+  fences/prose and validates; `decide()` retries on bad JSON (feeding the error back), then
+  falls back to synthesise. Never parse loose prose — this is the linchpin.
+- **The loop is a generator** `run_manager(...)` yielding events (start / manager_decision /
+  worker_result / critique / guardrail / synthesis / final). ONE loop feeds the CLI, the UI
+  timeline, and the tests; `run_manager_collect()` drains it for CLI/tests.
+- **Guardrails** (each force-tested): `max_steps`, `max_cost_usd` (checked before every call;
+  on cost-cap it assembles the answer from the transcript with NO extra paid call),
+  `max_calls_per_worker`, no-progress/stall (duplicate instruction or empty output). It
+  ALWAYS ends with a non-empty answer.
+- **Context discipline**: lead + workers run statelessly via `providers.ask` over a compact
+  transcript WE build (not `Agent.history`), so cost stays bounded.
+- **Optional critic** (`use_critic`, default off): one bounded quality pass per worker output;
+  fails OPEN, so it can never block a run.
+- **UI/CLI**: Team tab = mode switch + lead picker; Run tab = live decision timeline + steps/
+  cost-vs-cap. CLI: `python run.py --manager "task"`. Tunable defaults sit at the top of
+  `manager.py`. Verify free on Groq + Gemini.
 
+History: the original build brief is `~/.claude/plans/manager-mode-brief.md`.
 Full build plan: `~/.claude/plans/lets-go-with-that-quirky-feather.md`
 Strategy/market context: `~/.claude/projects/-Users-mohidhayee-Documents-ConnectAI/memory/`
 
@@ -46,8 +58,11 @@ Strategy/market context: `~/.claude/projects/-Users-mohidhayee-Documents-Connect
 ```bash
 source .venv/bin/activate
 python test_providers.py                   # confirm providers with keys work
-python run.py "your task here"             # CLI: multi-agent collaboration
-streamlit run app.py                       # web UI (BYO keys, 2–4 agents, model picker)
+python test_manager.py                     # Manager-mode logic tests (offline, free)
+python test_app.py                         # Streamlit UI smoke tests (offline, free)
+python run.py "your task here"             # CLI: round-robin collaboration
+python run.py --manager "your task here"   # CLI: Manager mode (lead delegates + synthesises)
+streamlit run app.py                       # web UI (mode switch, BYO keys, 2–4 agents, picker)
 ```
 
 ## Architecture (keep it this way)
@@ -60,9 +75,19 @@ streamlit run app.py                       # web UI (BYO keys, 2–4 agents, mod
 - `agent.py` — `Agent(name, model, role, api_key=None)`; `.provider` is derived from model.
 - `orchestrator.py` — `run(agents_list, task, max_turns)`; round-robin over 2–4 agents; an
   agent may only signal DONE at the end of a full round (`turn>=n and turn%n==0`).
-- `app.py` — imports `_build_prompt`/`_DONE_SIGNAL` from orchestrator (one source of truth).
-  BYO keys live in `st.session_state` only (never written to disk).
+- `manager.py` — Manager mode. `run_manager(manager, workers, task, *, max_steps,
+  max_cost_usd, max_retries, max_calls_per_worker, stall_limit, use_critic)` is a generator
+  of events; `decide()` (validated JSON + retries), `synthesize()` (best-effort with a
+  deterministic fallback), `parse_decision()` (robust parser), and the caps live here.
+  Round-robin stays in `orchestrator.py` — manager mode is additive.
+- `app.py` — imports `_build_prompt`/`_DONE_SIGNAL` from orchestrator and `run_manager` from
+  manager (one source of truth per mode). `build_agents()` is shared; `manager_timeline()`
+  renders the Manager event stream. Mode switch + lead picker in the Team tab. BYO keys live
+  in `st.session_state` only (never written to disk). Keep selectbox `format_func`s pure
+  (no `st.session_state` reads) — AppTest calls them outside a script run.
 - `test_providers.py` — smoke-tests the first model of each provider that has a key.
+- `test_manager.py` — offline Manager-mode tests (parser + every guardrail, via a fake
+  provider). `test_app.py` — offline Streamlit AppTest for both modes. Both free.
 - `.env` — secrets (gitignored, NEVER commit). All keys optional; `.env.example` shows shape.
 
 ## Provider notes (learned the hard way)
