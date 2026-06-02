@@ -435,8 +435,12 @@ def _build_manager_system(manager, workers):
         '  {"action": "finish", "final_answer": "<the complete answer to the task>"}\n\n'
         "RULES:\n"
         f'- "to" must be exactly one of: {names}.\n'
-        "- Delegate ONE concrete subtask at a time. Read what workers have already "
-        "returned before deciding, and never re-ask for work that's already done.\n"
+        "- Delegate ONE concrete subtask at a time, to the worker whose described "
+        "skill fits it best. Read what workers have already returned before "
+        "deciding, and never re-ask for work that's already done.\n"
+        "- Workers do NOT see the full history — only your instruction and the most "
+        "recent result. Put any specific details they need (facts to use, text to "
+        "edit) directly in the instruction.\n"
         "- When the task is fully handled, choose \"finish\" and put the COMPLETE, "
         "self-contained answer in \"final_answer\" — synthesise the workers' "
         "contributions into one coherent reply; if they disagree, reconcile it. "
