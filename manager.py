@@ -37,6 +37,18 @@ added in the next step.
 import json
 import re
 
+import providers
+
+
+# ── Tunables (the safety limits live here; the loop reads these) ─────────────────
+DEFAULT_MAX_STEPS = 12       # hard cap on Manager decisions in one run
+DEFAULT_MAX_RETRIES = 3      # how many times to re-ask after malformed JSON
+
+# When showing the Manager the work so far, cap each worker output so the prompt
+# (and cost) stays bounded as the transcript grows. Full outputs are still kept
+# for the final answer and the UI — this only trims the Manager's working view.
+_TRANSCRIPT_OUTPUT_CAP = 1200
+
 
 # ── The decision schema ─────────────────────────────────────────────────────────
 # A Manager decision is always one of these two actions. Anything else is invalid.
@@ -186,3 +198,315 @@ def _match_worker(name, workers):
         if w.lower() == lowered:
             return w
     return None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THE MANAGER LOOP
+# ══════════════════════════════════════════════════════════════════════════════
+# run_manager() is written as a GENERATOR: it `yield`s a small dict for every
+# thing that happens (a decision, a worker reply, the final answer). One loop then
+# feeds three callers — the CLI prints the events, the Streamlit UI renders them
+# live as a timeline, and the tests assert on them. No duplicated loop logic.
+#
+# Note on context: the Manager and workers are driven with providers.ask() and a
+# transcript WE build and keep compact — not the stateful Agent.history (which
+# would grow every turn and blow up cost). The Agent objects still carry the
+# name / model / role / api_key; we just control exactly what each one sees.
+
+
+def run_manager(manager, workers, task, *,
+                max_steps=DEFAULT_MAX_STEPS,
+                max_retries=DEFAULT_MAX_RETRIES):
+    """Run Manager Mode on a task, yielding events as they happen.
+
+    Args:
+        manager:      the lead Agent (coordinates; never writes worker content).
+        workers:      list of worker Agents the lead can delegate to (>= 1).
+        task:         the user's task, as plain text.
+        max_steps:    hard cap on Manager decisions (anti-infinite-loop).
+        max_retries:  re-asks allowed when the Manager returns malformed JSON.
+
+    Yields dicts with a "type":
+        start            — run is beginning (manager, workers, task, caps)
+        manager_decision — the Manager decided (decision, raw, attempts, error)
+        worker_result    — a worker replied (worker, output, error, cost)
+        synthesis        — we're building a best-effort answer after a forced stop
+        final            — the final answer (answer, finish_reason, steps, cost)
+
+    The run ALWAYS ends with a "final" event carrying a non-empty answer — even
+    if the Manager misbehaves, a worker fails, or a cap trips. That guarantee is
+    the whole point.
+    """
+    worker_by_name = {w.name: w for w in workers}
+    worker_names = list(worker_by_name)
+    transcript = []          # list of delegation records (see _run_worker)
+    steps_used = 0
+    finish_reason = None
+    final_answer = None
+
+    yield {"type": "start", "manager": manager.name, "workers": worker_names,
+           "task": task, "max_steps": max_steps}
+
+    # Defensive: no workers means nothing to coordinate. Don't crash — finish.
+    if not workers:
+        final_answer = "No worker agents were configured, so there was nothing to coordinate."
+        yield {"type": "final", "answer": final_answer, "finish_reason": "no_workers",
+               "steps": 0, "cost": providers.total_cost()}
+        return
+
+    while steps_used < max_steps:
+        steps_used += 1
+
+        # 1. Ask the Manager for its next decision (validated JSON, with retries).
+        result = decide(manager, task, transcript, workers, max_retries=max_retries)
+        decision = result["decision"]
+        yield {"type": "manager_decision", "step": steps_used, "decision": decision,
+               "raw": result["raw"], "attempts": result["attempts"],
+               "error": result["error"], "cost": providers.total_cost()}
+
+        # 2. If we couldn't get a valid decision after all retries, stop gracefully.
+        if decision is None:
+            finish_reason = "parse_failures"
+            break
+
+        # 3. Manager says we're done — take its answer as the final answer.
+        if decision["action"] == "finish":
+            final_answer = decision["final_answer"]
+            finish_reason = "manager_finished"
+            break
+
+        # 4. Otherwise it's a delegate: run that worker and record the result.
+        worker = worker_by_name[decision["to"]]   # name was validated in parse
+        output, error = _run_worker(worker, task, decision["instruction"], transcript)
+        transcript.append({
+            "step": steps_used, "to": decision["to"],
+            "instruction": decision["instruction"], "reason": decision["reason"],
+            "output": output, "error": error,
+        })
+        yield {"type": "worker_result", "step": steps_used, "worker": decision["to"],
+               "model": worker.model, "instruction": decision["instruction"],
+               "reason": decision["reason"], "output": output, "error": error,
+               "cost": providers.total_cost()}
+    else:
+        # while-loop ran the full count without a break → we hit the step cap.
+        finish_reason = "max_steps"
+
+    # 5. If the Manager never produced a final answer (a forced stop), synthesise
+    #    one from whatever work exists. This is the always-terminate guarantee.
+    if final_answer is None:
+        yield {"type": "synthesis", "reason": finish_reason}
+        final_answer = synthesize(manager, task, transcript, reason=finish_reason)
+
+    yield {"type": "final", "answer": final_answer, "finish_reason": finish_reason,
+           "steps": steps_used, "cost": providers.total_cost()}
+
+
+def run_manager_collect(manager, workers, task, **kwargs):
+    """Convenience: run the loop to completion and return (final_event, events).
+
+    Handy for the CLI and tests, which want the whole result, not a live stream.
+    """
+    events = []
+    for event in run_manager(manager, workers, task, **kwargs):
+        events.append(event)
+    final = next((e for e in reversed(events) if e["type"] == "final"), None)
+    return final, events
+
+
+# ── The Manager's decision step (ask → parse → validate → retry → give up) ──────--
+
+def decide(manager, task, transcript, workers, *, max_retries=DEFAULT_MAX_RETRIES):
+    """Ask the Manager for its next decision and validate it.
+
+    Returns a dict: {"decision", "raw", "attempts", "error"}.
+      - decision: a validated decision dict, or None if every attempt failed.
+      - raw:      the Manager's last raw reply (for the UI / debugging).
+      - attempts: how many model calls it took.
+      - error:    the last error message, if any.
+
+    On malformed JSON we feed the parser's (human-readable) error back to the
+    Manager and ask again, up to max_retries. If it still can't comply, we return
+    decision=None so the caller falls back to synthesising a best-effort answer —
+    a misbehaving Manager can never hang or crash the loop.
+    """
+    system = _build_manager_system(manager, workers)
+    base_user = _build_manager_user(task, transcript)
+    worker_names = [w.name for w in workers]
+
+    feedback = ""
+    last_error = None
+    raw = ""
+
+    for attempt in range(1, max_retries + 1):
+        user = base_user + feedback
+        try:
+            raw = providers.ask(prompt=user, model=manager.model,
+                                system=system, api_key=manager.api_key)
+        except providers.ProviderError as e:
+            # The provider itself failed (bad key, network, etc.). Retrying the
+            # exact same call rarely helps, so stop and let the caller synthesise.
+            return {"decision": None, "raw": "", "attempts": attempt, "error": str(e)}
+
+        try:
+            decision = parse_decision(raw, valid_workers=worker_names)
+            return {"decision": decision, "raw": raw, "attempts": attempt, "error": None}
+        except DecisionParseError as e:
+            last_error = str(e)
+            feedback = (
+                f"\n\n⚠ Your previous reply could not be used: {e}\n"
+                "Reply with ONLY one valid JSON object — no prose, no code fences."
+            )
+
+    return {"decision": None, "raw": raw, "attempts": max_retries, "error": last_error}
+
+
+# ── Running a worker (stateless, curated context) ───────────────────────────────--
+
+def _run_worker(worker, task, instruction, transcript):
+    """Run one worker on one subtask. Returns (output, error).
+
+    The worker sees the overall task, its specific instruction, and ONLY the most
+    recent prior output (the thing it's most likely to build on) — not the whole
+    history. If the worker's provider errors, we capture it as `error` and return
+    an empty output instead of crashing: the Manager will see the failure in the
+    transcript next turn and can route around it.
+    """
+    prior = next((r["output"] for r in reversed(transcript) if r.get("output")), None)
+    user = _build_worker_prompt(task, instruction, prior)
+    try:
+        output = providers.ask(prompt=user, model=worker.model,
+                               system=worker.role, api_key=worker.api_key)
+        return output.strip(), None
+    except providers.ProviderError as e:
+        return "", str(e)
+
+
+# ── Synthesising the final answer (best effort, always returns something) ───────--
+
+def synthesize(manager, task, transcript, *, reason=""):
+    """Ask the Manager to write the final answer from the work so far.
+
+    Used whenever the loop is forced to stop before the Manager said "finish"
+    (step cap, malformed output, etc.). If even this call fails or comes back
+    empty, we fall back to a deterministic answer assembled straight from the
+    transcript — so the run NEVER ends without an answer.
+    """
+    system = _build_synth_system()
+    user = _build_synth_user(task, transcript, reason)
+    try:
+        answer = providers.ask(prompt=user, model=manager.model,
+                               system=system, api_key=manager.api_key)
+        if answer.strip():
+            return answer.strip()
+    except providers.ProviderError:
+        pass
+    return _best_effort_from_transcript(transcript)
+
+
+def _best_effort_from_transcript(transcript):
+    """A last-resort answer built from worker outputs, with no extra model call."""
+    outputs = [r for r in transcript if r.get("output")]
+    if not outputs:
+        return ("The team couldn't produce an answer within the limits set. "
+                "Try again with a higher step or cost budget, or a clearer task.")
+    return "\n\n".join(f"**{r['to']}:**\n{r['output']}" for r in outputs)
+
+
+# ── Prompt builders ─────────────────────────────────────────────────────────────--
+
+def _build_manager_system(manager, workers):
+    """The Manager's system prompt: who it is, its team, and the strict protocol.
+
+    Note: in Manager Mode the lead's *configured* role text is intentionally
+    replaced by these coordination instructions (its name and model still apply).
+    The job of the lead is fixed — coordinate and emit JSON — so we don't let a
+    "you are a poet" role prompt talk it out of returning valid decisions.
+    """
+    roster = "\n".join(f'  - "{w.name}": {_short(w.role, 160)}' for w in workers)
+    names = ", ".join(f'"{w.name}"' for w in workers)
+    return (
+        f"You are {manager.name}, the LEAD of a small AI team. You do NOT do the "
+        "work yourself — you break the task down, delegate subtasks to the worker "
+        "best suited to each, and finally deliver one synthesised answer.\n\n"
+        f"YOUR WORKERS:\n{roster}\n\n"
+        "EVERY turn, reply with EXACTLY ONE JSON object and nothing else — no "
+        "prose, no markdown code fences. It must be one of:\n\n"
+        '  {"action": "delegate", "to": "<worker name>", "instruction": "<the subtask>", "reason": "<short why>"}\n'
+        '  {"action": "finish", "final_answer": "<the complete answer to the task>"}\n\n'
+        "RULES:\n"
+        f'- "to" must be exactly one of: {names}.\n'
+        "- Delegate ONE concrete subtask at a time. Read what workers have already "
+        "returned before deciding, and never re-ask for work that's already done.\n"
+        "- When the task is fully handled, choose \"finish\" and put the COMPLETE, "
+        "self-contained answer in \"final_answer\" — synthesise the workers' "
+        "contributions into one coherent reply; if they disagree, reconcile it. "
+        "Do not just point at their work."
+    )
+
+
+def _build_manager_user(task, transcript):
+    """The per-turn message: the task + a compact view of the work so far."""
+    return (
+        f"TASK:\n{task}\n\n"
+        f"WORK SO FAR:\n{_render_transcript(transcript)}\n\n"
+        "What is your next decision? Reply with ONE JSON object only."
+    )
+
+
+def _build_worker_prompt(task, instruction, prior_output):
+    """The message a worker receives for one subtask."""
+    msg = f"You're part of a team working on this overall TASK:\n{task}\n\n"
+    if prior_output:
+        msg += (
+            "RELEVANT WORK ALREADY DONE (build on it; don't repeat it):\n"
+            f"{_short(prior_output, 2000)}\n\n"
+        )
+    msg += (
+        f"YOUR SUBTASK (assigned by the lead):\n{instruction}\n\n"
+        "Do exactly this subtask — focused and concrete. Don't try to do the "
+        "whole task or anyone else's part."
+    )
+    return msg
+
+
+def _build_synth_system():
+    return (
+        "You are the lead, delivering the FINAL answer to the task. Use the team's "
+        "work below. Reconcile any contradictions and prefer well-supported content. "
+        "Write the complete answer directly — do not describe the process or mention "
+        "the workers by name. Output only the final answer."
+    )
+
+
+def _build_synth_user(task, transcript, reason):
+    note = ""
+    if reason and reason != "manager_finished":
+        note = (
+            f"\n(Note: the run stopped early — reason: {reason}. Do the best you can "
+            "with the work that exists.)\n"
+        )
+    return (
+        f"TASK:\n{task}\n\n"
+        f"THE TEAM'S WORK:\n{_render_transcript(transcript)}\n{note}\n"
+        "Write the final answer now."
+    )
+
+
+def _render_transcript(transcript):
+    """Compact, readable view of the work so far, for the Manager's prompt."""
+    if not transcript:
+        return "Nothing yet — this is your first decision."
+    lines = []
+    for r in transcript:
+        lines.append(f'[Step {r["step"]}] You delegated to {r["to"]}: {r["instruction"]}')
+        if r.get("error"):
+            lines.append(f'   → {r["to"]} FAILED: {r["error"]} (try another worker or finish)')
+        else:
+            lines.append(f'   → {r["to"]} returned:\n{_short(r["output"], _TRANSCRIPT_OUTPUT_CAP)}')
+    return "\n".join(lines)
+
+
+def _short(text, limit):
+    """Trim text to `limit` chars with an ellipsis, so prompts stay bounded."""
+    text = (text or "").strip()
+    return text if len(text) <= limit else text[:limit].rstrip() + " …[trimmed]"
