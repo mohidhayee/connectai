@@ -85,6 +85,10 @@ It's deliberately hand-rolled (no agent frameworks) so the logic stays readable 
 easy to learn from. `litellm` underneath means ~any model from any provider works
 through the same interface.
 
+📖 **Want the full story?** [How ConnectAI was built](docs/HOW_IT_WAS_BUILT.md) covers
+the stack, the phase-by-phase journey, the decisions, and a deep-dive on Manager
+Mode's reliability engineering — including how every failure mode was tested.
+
 ## Roadmap
 
 - [x] **Phase 0** — Project setup
