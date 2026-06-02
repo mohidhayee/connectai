@@ -14,6 +14,7 @@ import streamlit as st
 
 from agent import Agent
 from orchestrator import _build_prompt, _DONE_SIGNAL
+from manager import run_manager, DEFAULT_MAX_STEPS, DEFAULT_MAX_COST_USD
 from providers import (
     reset_cost, total_cost, is_configured, provider_for, ProviderError,
 )
@@ -87,6 +88,113 @@ def model_option_label(val):
 
 
 MODEL_OPTIONS = [m["id"] for m in all_models()] + [CUSTOM]
+
+
+def build_agents(cfgs):
+    """Turn the UI's agent configs into Agent objects. Used by BOTH modes.
+
+    Returns (agents, problems). `problems` lists human-readable reasons a run
+    can't start yet (missing model / missing key); when it's empty, `agents`
+    lines up 1-to-1 with `cfgs` in order.
+    """
+    built, problems = [], []
+    for cfg in cfgs:
+        model = resolved_model(cfg)
+        if not model:
+            problems.append(f"**{cfg['name']}** has no model selected.")
+            continue
+        if not model_ready(model, cfg.get("custom_key")):
+            p = pmeta(provider_for(model))
+            problems.append(f"**{cfg['name']}** uses {p['label']} ({model}) but no key is set.")
+        built.append(Agent(cfg["name"], model, cfg["role"],
+                           api_key=agent_key(model, cfg.get("custom_key"))))
+    return built, problems
+
+
+def _agent_head(name, model, tail):
+    """The little coloured header used on each card (emoji · provider · model)."""
+    m = pmeta(provider_for(model))
+    label = find_model(model)["label"] if find_model(model) else model
+    st.markdown(
+        f'<div class="cai-turnhead">{m["emoji"]} {name} '
+        f'<small>· {m["label"]} · {label} · {tail}</small></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def manager_timeline(manager, workers, task, *, max_steps, max_cost, use_critic,
+                     cost_box, steps_box):
+    """Run Manager Mode and render every decision as a live timeline.
+
+    Consumes the SAME run_manager() generator the CLI and tests use, so the UI is
+    just a view over the engine. Returns (final_answer, finish_reason, steps).
+    """
+    final_answer, finish_reason, steps = "", None, 0
+
+    try:
+        for ev in run_manager(manager, workers, task, max_steps=max_steps,
+                              max_cost_usd=max_cost, use_critic=use_critic):
+            t = ev["type"]
+
+            if t == "manager_decision":
+                steps = ev["step"]
+                steps_box.metric("Steps", f"{steps} / {max_steps}")
+                cost_box.metric("Cost", f"${ev['cost']:.4f} / ${max_cost:.2f}")
+                with st.container(border=True):
+                    _agent_head(manager.name, manager.model,
+                                f"Manager · step {steps}/{max_steps}")
+                    d = ev["decision"]
+                    if d is None:
+                        st.warning(
+                            f"Couldn't get a valid decision after {ev['attempts']} "
+                            f"tries ({ev['error']}). Falling back to a best-effort answer."
+                        )
+                    elif d["action"] == "delegate":
+                        st.markdown(f"**→ Delegates to {d['to']}**")
+                        if d.get("reason"):
+                            st.caption(f"Why: {d['reason']}")
+                        st.markdown(f"> {d['instruction']}")
+                    else:
+                        st.markdown("**✓ Decides the task is complete.**")
+                    if ev["attempts"] > 1 and d is not None:
+                        st.caption(f"(took {ev['attempts']} tries to get valid JSON)")
+
+            elif t == "worker_result":
+                cost_box.metric("Cost", f"${ev['cost']:.4f} / ${max_cost:.2f}")
+                with st.container(border=True):
+                    _agent_head(ev["worker"], ev["model"], f"worker · step {ev['step']}")
+                    if ev["error"]:
+                        st.error(f"Worker error: {ev['error']}")
+                    elif ev["output"]:
+                        st.markdown(ev["output"])
+                    else:
+                        st.caption("(returned nothing)")
+
+            elif t == "critique":
+                if ev["accept"]:
+                    st.caption(f"🔎 Quality check [OK]: {ev['feedback']}")
+                else:
+                    st.warning(f"🔎 Quality check [needs work]: {ev['feedback']}")
+
+            elif t == "guardrail":
+                st.warning(f"⛔ Guardrail — **{ev['name']}**: {ev['detail']}")
+
+            elif t == "synthesis":
+                st.info(f"⏳ Stopping ({ev['reason']}) — asking {manager.name} to "
+                        "synthesise the best possible answer from the work so far…")
+
+            elif t == "final":
+                final_answer = ev["answer"]
+                finish_reason = ev["finish_reason"]
+                steps = ev["steps"]
+                cost_box.metric("Cost", f"${ev['cost']:.4f} / ${max_cost:.2f}")
+                steps_box.metric("Steps", f"{steps} / {max_steps}")
+    except ProviderError as e:
+        st.error(f"Provider error: {e}")
+    except Exception as e:  # never white-screen — surface and keep the page alive
+        st.error(f"Unexpected error: {e}")
+
+    return final_answer, finish_reason, steps
 
 # ── CSS (modern look) ─────────────────────────────────────────────────────────
 st.markdown(
@@ -170,6 +278,37 @@ with tab_team:
         "combine their strengths — e.g. Claude to code, Gemini to reason, "
         "Perplexity to research live."
     )
+
+    # ── Collaboration mode ────────────────────────────────────────────────────
+    with st.container(border=True):
+        mode = st.radio(
+            "Collaboration mode", ["Round-robin", "Manager"],
+            key="mode_choice", horizontal=True,
+            help="Round-robin: agents take turns adding to a shared scratchpad. "
+                 "Manager: one lead agent delegates subtasks to the others and "
+                 "synthesises the final answer.",
+        )
+        if mode == "Manager":
+            agent_ids = [c["id"] for c in st.session_state.agents]
+            # Reset the stored lead if it points at a removed agent (avoids a crash).
+            if st.session_state.get("lead_choice") not in agent_ids:
+                st.session_state.lead_choice = agent_ids[0]
+
+            def _lead_label(aid):
+                c = next(c for c in st.session_state.agents if c["id"] == aid)
+                return f"{c['name'] or 'Agent'}"
+
+            st.selectbox(
+                "👑 Lead (the Manager)", agent_ids, key="lead_choice",
+                format_func=_lead_label,
+                help="This agent coordinates: it delegates subtasks to the others "
+                     "and writes the final answer. In Manager mode its own role "
+                     "text is replaced by manager instructions — but its MODEL "
+                     "still matters, so pick a strong reasoner. The other agents "
+                     "become workers (their roles are used).",
+            )
+            st.caption("Everyone except the lead becomes a worker. Verify free on "
+                       "Groq/Gemini before switching the lead to a paid model.")
 
     remove_id = None
     for i, cfg in enumerate(st.session_state.agents):
@@ -266,13 +405,45 @@ with tab_run:
         height=100, key="task",
     )
 
-    s1, s2 = st.columns([3, 1])
-    with s2:
-        max_turns = st.slider(
-            "Max turns", min_value=2, max_value=16, value=6,
-            help="Maximum replies across all agents combined. Each reply is 1 turn. "
-                 "Stops early when an agent signals the task is done.",
-        )
+    is_manager = st.session_state.get("mode_choice", "Round-robin") == "Manager"
+
+    if is_manager:
+        lead_id = st.session_state.get("lead_choice")
+        lead_cfg = next((c for c in st.session_state.agents if c["id"] == lead_id),
+                        st.session_state.agents[0])
+        workers_str = ", ".join(c["name"] for c in st.session_state.agents
+                                if c["id"] != lead_cfg["id"]) or "—"
+        st.caption(f"🧭 **Manager mode** — 👑 lead: **{lead_cfg['name']}**  ·  "
+                   f"workers: {workers_str}  (change in the **👥 Team** tab)")
+        mc1, mc2, mc3 = st.columns(3)
+        with mc1:
+            max_steps = st.slider(
+                "Max steps", min_value=2, max_value=20, value=DEFAULT_MAX_STEPS,
+                help="Hard cap on the lead's decisions — the main brake on runaway loops.",
+            )
+        with mc2:
+            max_cost = st.number_input(
+                "Max cost (USD)", min_value=0.0, value=float(DEFAULT_MAX_COST_USD),
+                step=0.05, format="%.2f",
+                help="Hard spend cap, checked before every model call. On Groq/Gemini "
+                     "you'll rarely get close.",
+            )
+        with mc3:
+            st.write("")  # vertical spacer to line the checkbox up with the inputs
+            use_critic = st.checkbox(
+                "🔎 Quality critic", value=False,
+                help="One review pass per worker output (advisory — fed back to the "
+                     "lead). Improves quality but adds model calls.",
+            )
+    else:
+        st.caption("🔁 **Round-robin mode** — agents take turns on a shared scratchpad.")
+        s1, s2 = st.columns([3, 1])
+        with s2:
+            max_turns = st.slider(
+                "Max turns", min_value=2, max_value=16, value=6,
+                help="Maximum replies across all agents combined. Each reply is 1 turn. "
+                     "Stops early when an agent signals the task is done.",
+            )
 
     c1, c2, c3 = st.columns([2, 1, 1])
     with c1:
@@ -281,26 +452,17 @@ with tab_run:
     with c2:
         cost_box = st.empty()
     with c3:
-        turn_box = st.empty()
-    cost_box.metric("Cost", "$0.0000")
-    turn_box.metric("Turns", f"0 / {max_turns}")
+        prog_box = st.empty()
+    if is_manager:
+        cost_box.metric("Cost", f"$0.0000 / ${max_cost:.2f}")
+        prog_box.metric("Steps", f"0 / {max_steps}")
+    else:
+        cost_box.metric("Cost", "$0.0000")
+        prog_box.metric("Turns", f"0 / {max_turns}")
 
-    # ── Collaboration loop ────────────────────────────────────────────────────
+    # ── Run ─────────────────────────────────────────────────────────────────--
     if run_btn and task.strip():
-        built, problems = [], []
-        for cfg in st.session_state.agents:
-            model = resolved_model(cfg)
-            if not model:
-                problems.append(f"**{cfg['name']}** has no model selected.")
-                continue
-            if not model_ready(model, cfg.get("custom_key")):
-                p = pmeta(provider_for(model))
-                problems.append(
-                    f"**{cfg['name']}** uses {p['label']} ({model}) but no key is set."
-                )
-            built.append(Agent(cfg["name"], model, cfg["role"],
-                               api_key=agent_key(model, cfg.get("custom_key"))))
-
+        agents, problems = build_agents(st.session_state.agents)
         if problems:
             st.error("Can't run yet:\n\n- " + "\n- ".join(problems) +
                      "\n\nAdd the missing key in the **🔑 API keys** tab, or switch that "
@@ -308,56 +470,89 @@ with tab_run:
             st.stop()
 
         reset_cost()
-        agents = built
-        n = len(agents)
-        scratchpad = ""
         st.divider()
 
-        for turn in range(1, max_turns + 1):
-            agent = agents[(turn - 1) % n]
-            m = pmeta(agent.provider)
-            can_stop = (turn >= n) and (turn % n == 0)
+        # ── MANAGER MODE ───────────────────────────────────────────────────────
+        if is_manager:
+            lead_idx = next((i for i, c in enumerate(st.session_state.agents)
+                             if c["id"] == st.session_state.get("lead_choice")), 0)
+            manager = agents[lead_idx]
+            workers = [a for i, a in enumerate(agents) if i != lead_idx]
 
-            user_msg = _build_prompt(agents, agent, task, scratchpad, can_stop)
-            done_this_turn = False
+            final_answer, finish_reason, steps = manager_timeline(
+                manager, workers, task, max_steps=max_steps, max_cost=max_cost,
+                use_critic=use_critic, cost_box=cost_box, steps_box=prog_box,
+            )
 
-            with st.container(border=True):
-                st.markdown(
-                    f'<div class="cai-turnhead">{m["emoji"]} {agent.name} '
-                    f'<small>· {m["label"]} · {agent.model} · turn {turn}/{max_turns}</small></div>',
-                    unsafe_allow_html=True,
+            st.divider()
+            st.subheader("📄 Final answer")
+            if final_answer:
+                st.markdown(final_answer)
+                st.download_button(
+                    "⬇  Download answer (.md)", data=final_answer.strip(),
+                    file_name="connectai_answer.md", mime="text/markdown",
                 )
-                with st.spinner(f"{agent.name} is thinking…"):
-                    try:
-                        reply = agent.reply(user_msg)
-                    except ProviderError as e:
-                        st.error(f"Provider error: {e}")
-                        break
+            reason_label = {
+                "manager_finished": "✓ the manager finished",
+                "max_steps": "⛔ hit the step cap",
+                "cost_cap": "⛔ hit the cost cap",
+                "stalled": "⛔ no further progress",
+                "parse_failures": "⛔ manager output couldn't be parsed",
+                "no_workers": "no workers configured",
+            }.get(finish_reason, str(finish_reason))
+            st.caption(f"Ended: {reason_label}  ·  {steps} steps  ·  ${total_cost():.4f}")
+            st.metric("Total cost", f"${total_cost():.4f}")
 
-                display_reply = reply
-                if reply.strip().upper().startswith(_DONE_SIGNAL):
-                    done_this_turn = True
-                    parts = reply.strip().split("\n", 1)
-                    display_reply = parts[1].strip() if len(parts) > 1 else ""
-
-                if display_reply:
-                    st.markdown(display_reply)
-
-            scratchpad += f"\n--- {agent.name} (turn {turn}) ---\n{display_reply}\n"
-            cost_box.metric("Cost", f"${total_cost():.4f}")
-            turn_box.metric("Turns", f"{turn} / {max_turns}")
-
-            if done_this_turn:
-                st.success(f"✓ {agent.name} signalled the task is complete.")
-                break
+        # ── ROUND-ROBIN MODE (unchanged) ───────────────────────────────────────
         else:
-            st.info(f"Reached the turn limit ({max_turns} turns).")
+            n = len(agents)
+            scratchpad = ""
 
-        st.divider()
-        st.subheader("📄 Final result")
-        st.markdown(scratchpad)
-        st.download_button(
-            "⬇  Download result (.md)", data=scratchpad.strip(),
-            file_name="connectai_result.md", mime="text/markdown",
-        )
-        st.metric("Total cost", f"${total_cost():.4f}")
+            for turn in range(1, max_turns + 1):
+                agent = agents[(turn - 1) % n]
+                m = pmeta(agent.provider)
+                can_stop = (turn >= n) and (turn % n == 0)
+
+                user_msg = _build_prompt(agents, agent, task, scratchpad, can_stop)
+                done_this_turn = False
+
+                with st.container(border=True):
+                    st.markdown(
+                        f'<div class="cai-turnhead">{m["emoji"]} {agent.name} '
+                        f'<small>· {m["label"]} · {agent.model} · turn {turn}/{max_turns}</small></div>',
+                        unsafe_allow_html=True,
+                    )
+                    with st.spinner(f"{agent.name} is thinking…"):
+                        try:
+                            reply = agent.reply(user_msg)
+                        except ProviderError as e:
+                            st.error(f"Provider error: {e}")
+                            break
+
+                    display_reply = reply
+                    if reply.strip().upper().startswith(_DONE_SIGNAL):
+                        done_this_turn = True
+                        parts = reply.strip().split("\n", 1)
+                        display_reply = parts[1].strip() if len(parts) > 1 else ""
+
+                    if display_reply:
+                        st.markdown(display_reply)
+
+                scratchpad += f"\n--- {agent.name} (turn {turn}) ---\n{display_reply}\n"
+                cost_box.metric("Cost", f"${total_cost():.4f}")
+                prog_box.metric("Turns", f"{turn} / {max_turns}")
+
+                if done_this_turn:
+                    st.success(f"✓ {agent.name} signalled the task is complete.")
+                    break
+            else:
+                st.info(f"Reached the turn limit ({max_turns} turns).")
+
+            st.divider()
+            st.subheader("📄 Final result")
+            st.markdown(scratchpad)
+            st.download_button(
+                "⬇  Download result (.md)", data=scratchpad.strip(),
+                file_name="connectai_result.md", mime="text/markdown",
+            )
+            st.metric("Total cost", f"${total_cost():.4f}")
