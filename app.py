@@ -131,6 +131,18 @@ def model_sub(model):
     return f"{p['label']} · {name}"
 
 
+# st.chat_message avatars must be REAL emoji. Some of config.py's display glyphs
+# (Gemini's "✦", the "•" fallback) aren't valid emoji and make chat_message raise,
+# so map each provider to a guaranteed-valid emoji for avatars here. (The original
+# glyphs are still fine for plain text like the team strip.)
+AVATARS = {"groq": "⚡", "gemini": "✨", "openai": "🤖",
+           "anthropic": "🧠", "perplexity": "🔎"}
+
+
+def avatar_for(model):
+    return AVATARS.get(provider_for(model), "🤖")
+
+
 # ── CSS (keep the brand; constrain the chat column for readability) ─────────────--
 st.markdown(
     """
@@ -194,6 +206,9 @@ def render_message(m):
         with st.chat_message("Final", avatar="✅"):
             st.markdown("**📄 Final answer**")
             st.markdown(m["content"])
+            with st.expander("📋 Copy as text"):
+                # st.code shows a one-click copy button in its top-right corner.
+                st.code(m["content"], language=None)
             if m.get("meta"):
                 st.caption(m["meta"])
 
@@ -221,7 +236,7 @@ def run_round_robin(agents, task, *, max_turns, add):
 
         if display:
             add({"kind": "agent", "name": agent.name,
-                 "emoji": pmeta(agent.provider)["emoji"],
+                 "emoji": avatar_for(agent.model),
                  "sub": f"{model_sub(agent.model)} · turn {turn}/{max_turns}",
                  "content": display})
         scratchpad += f"\n--- {agent.name} (turn {turn}) ---\n{display}\n"
@@ -256,7 +271,7 @@ def run_manager_chat(manager, workers, task, *, max_steps, max_cost, use_critic,
                      "content": f"**Step {ev['step']} — Task complete; synthesising the answer.**"})
         elif t == "worker_result":
             add({"kind": "worker", "name": ev["worker"],
-                 "emoji": pmeta(provider_for(ev["model"]))["emoji"],
+                 "emoji": avatar_for(ev["model"]),
                  "sub": f"{model_sub(ev['model'])} · step {ev['step']}",
                  "content": (ev["error"] and f"Worker error: {ev['error']}") or ev["output"],
                  "error": bool(ev["error"])})

@@ -154,6 +154,21 @@ def test_manager_mode():
         assert "Delegates to Planner" in md, "lead change didn't reassign the worker"
     check("changing the Lead reassigns who the workers are", lead_picker_switches_workers)
 
+    def non_groq_avatar():
+        # A worker on a NON-Groq provider must render without the bad-emoji avatar
+        # crash that earlier slipped past Groq-only tests (Gemini's glyph isn't a
+        # valid st.chat_message avatar).
+        install_fakes("Gem")
+        agents = _groq_agents(["Lead", "Gem"])
+        agents[1]["model"] = "gemini/gemini-2.5-flash"
+        at = _new_app("Manager", agents=agents, lead_id=0)
+        at.session_state["key_gemini"] = "x"
+        at.run()
+        _submit(at)
+        assert not at.exception, at.exception
+        assert "FINAL MANAGER ANSWER" in _all_markdown(at), "run didn't complete"
+    check("a non-Groq (Gemini) agent renders without a bad-avatar crash", non_groq_avatar)
+
 
 def test_agent_count():
     print("\nAGENT COUNT (cap raised to 2–7):")
