@@ -67,7 +67,8 @@ def _groq_agents(names):
     ]
 
 
-def _new_app(mode, task="Write a haiku about studying.", agents=None, lead_id=0):
+def _new_app(mode, agents=None, lead_id=0):
+    """Build (but don't run) an AppTest with the given mode/team configured."""
     agents = agents if agents is not None else _groq_agents(["Planner", "Writer"])
     at = AppTest.from_file("app.py", default_timeout=90)
     at.session_state["key_groq"] = "x"          # satisfy provider_ready("groq")
@@ -76,13 +77,13 @@ def _new_app(mode, task="Write a haiku about studying.", agents=None, lead_id=0)
     at.session_state["mode_choice"] = mode
     if mode == "Manager":
         at.session_state["lead_choice"] = lead_id   # agent 0 leads by default
-    at.session_state["task"] = task
     return at
 
 
-def _click_run(at):
-    run_btn = next(b for b in at.button if "Run collaboration" in b.label)
-    run_btn.click().run()
+def _submit(at, task="Write a haiku about studying."):
+    """Type a task into the chat box and submit it — runs the collaboration."""
+    at.chat_input[0].set_value(task).run()
+    return at
 
 
 def _all_markdown(at):
@@ -117,13 +118,11 @@ def test_round_robin():
         install_fakes()
         at = _new_app("Round-robin")
         at.run()
-        _click_run(at)
+        _submit(at)
         assert not at.exception, at.exception
         assert "Round-robin reply text." in _all_markdown(at), "no round-robin output rendered"
-        assert any("Final result" in m.value for m in at.markdown) \
-            or any(m.value == "📄 Final result" for m in at.subheader), "no final result"
-        assert len(at.metric) > 0, "no metrics rendered"
-    check("round-robin renders turns, final result, and metrics, no exception", runs_clean)
+        assert len(at.metric) > 0, "no cost metric rendered"
+    check("round-robin renders turns + cost, no exception", runs_clean)
 
 
 def test_manager_mode():
@@ -135,22 +134,21 @@ def test_manager_mode():
         at.run()
         # The Lead picker should appear in Manager mode.
         assert any("Lead" in (s.label or "") for s in at.selectbox), "no Lead picker shown"
-        _click_run(at)
+        _submit(at)
         assert not at.exception, at.exception
         md = _all_markdown(at)
         assert "FINAL MANAGER ANSWER" in md, "manager's final answer not rendered"
         assert "Delegates to Writer" in md, "delegation not shown in the timeline"
         assert "Worker output text." in md, "worker reply not shown in the timeline"
-        assert len(at.metric) > 0, "no steps/cost metrics rendered"
-    check("manager timeline shows delegation, worker reply, final answer, metrics", runs_clean)
+        assert len(at.metric) > 0, "no cost metric rendered"
+    check("manager timeline shows delegation, worker reply, final answer, metric", runs_clean)
 
     def lead_picker_switches_workers():
-        # With Writer as lead, the worker becomes Planner; delegate must target it.
+        # With Writer (id 1) as lead, the worker becomes Planner; delegate must target it.
         install_fakes("Planner")
-        at = _new_app("Manager")
-        at.session_state["lead_choice"] = 1     # Writer leads now
+        at = _new_app("Manager", lead_id=1)
         at.run()
-        _click_run(at)
+        _submit(at)
         assert not at.exception, at.exception
         md = _all_markdown(at)
         assert "Delegates to Planner" in md, "lead change didn't reassign the worker"
@@ -179,7 +177,7 @@ def test_agent_count():
         agents = _groq_agents(["Lead", "Worker1", "Worker2", "Worker3", "Worker4", "Worker5"])
         at = _new_app("Manager", agents=agents, lead_id=0)
         at.run()
-        _click_run(at)
+        _submit(at)
         assert not at.exception, at.exception
         md = _all_markdown(at)
         assert "FINAL MANAGER ANSWER" in md, "no final answer with 6 agents"
