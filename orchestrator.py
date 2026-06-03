@@ -1,5 +1,5 @@
 """
-orchestrator.py — drives a team of agents (2–4) on a shared task.
+orchestrator.py — drives a team of agents (2–7) on a shared task.
 
 How it works:
   1. Each agent takes a turn in order (round-robin): A, B, C, A, B, C, ...
@@ -24,7 +24,7 @@ def run(agents, task, max_turns=8):
     """Run a team of agents on a task and return the final scratchpad.
 
     Args:
-        agents:     list of 2–4 Agent instances (ideally different providers).
+        agents:     list of 2–7 Agent instances (ideally different providers).
         task:       plain-text description of what to accomplish.
         max_turns:  hard cap on total turns (each agent reply = 1 turn).
 

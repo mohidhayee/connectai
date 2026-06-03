@@ -57,24 +57,25 @@ def install_fakes(worker_name="Writer"):
 
 # ── Shared AppTest setup ────────────────────────────────────────────────────────
 
-def _two_groq_agents():
-    """Two agents on a free Groq model (so no key/provider blocks the run)."""
+def _groq_agents(names):
+    """Build agents on a free Groq model (so no key/provider blocks the run),
+    with ids 0..n-1 and the given display names."""
     return [
-        {"id": 0, "name": "Planner", "model": "groq/llama-3.3-70b-versatile",
-         "custom_model": "", "custom_key": "", "role": "You are Planner."},
-        {"id": 1, "name": "Writer", "model": "groq/llama-3.3-70b-versatile",
-         "custom_model": "", "custom_key": "", "role": "You are Writer."},
+        {"id": i, "name": n, "model": "groq/llama-3.3-70b-versatile",
+         "custom_model": "", "custom_key": "", "role": f"You are {n}."}
+        for i, n in enumerate(names)
     ]
 
 
-def _new_app(mode, task="Write a haiku about studying."):
-    at = AppTest.from_file("app.py", default_timeout=60)
+def _new_app(mode, task="Write a haiku about studying.", agents=None, lead_id=0):
+    agents = agents if agents is not None else _groq_agents(["Planner", "Writer"])
+    at = AppTest.from_file("app.py", default_timeout=90)
     at.session_state["key_groq"] = "x"          # satisfy provider_ready("groq")
-    at.session_state["agents"] = _two_groq_agents()
-    at.session_state["next_id"] = 2
+    at.session_state["agents"] = agents
+    at.session_state["next_id"] = len(agents)
     at.session_state["mode_choice"] = mode
     if mode == "Manager":
-        at.session_state["lead_choice"] = 0     # Planner leads; Writer is the worker
+        at.session_state["lead_choice"] = lead_id   # agent 0 leads by default
     at.session_state["task"] = task
     return at
 
@@ -156,6 +157,36 @@ def test_manager_mode():
     check("changing the Lead reassigns who the workers are", lead_picker_switches_workers)
 
 
+def test_agent_count():
+    print("\nAGENT COUNT (cap raised to 2–7):")
+
+    def cap_boundary():
+        # "Add agent" should still appear at 6 agents, and be gone at 7 (the cap).
+        at6 = _new_app("Round-robin", agents=_groq_agents([f"A{i}" for i in range(6)]))
+        at6.run()
+        assert not at6.exception, at6.exception
+        assert any("Add agent" in b.label for b in at6.button), "'Add agent' missing at 6"
+        at7 = _new_app("Round-robin", agents=_groq_agents([f"A{i}" for i in range(7)]))
+        at7.run()
+        assert not at7.exception, at7.exception
+        assert not any("Add agent" in b.label for b in at7.button), \
+            "'Add agent' still shown at 7 — cap not enforced"
+    check("'Add agent' available at 6, blocked at 7 (cap = 7)", cap_boundary)
+
+    def manager_with_many_workers():
+        # 1 lead + 5 workers — proves Manager mode works past the old 4-agent cap.
+        install_fakes("Worker1")
+        agents = _groq_agents(["Lead", "Worker1", "Worker2", "Worker3", "Worker4", "Worker5"])
+        at = _new_app("Manager", agents=agents, lead_id=0)
+        at.run()
+        _click_run(at)
+        assert not at.exception, at.exception
+        md = _all_markdown(at)
+        assert "FINAL MANAGER ANSWER" in md, "no final answer with 6 agents"
+        assert "Delegates to Worker1" in md, "delegation not shown with 6 agents"
+    check("manager mode runs with 6 agents (1 lead + 5 workers)", manager_with_many_workers)
+
+
 def main():
     print("=" * 62)
     print("ConnectAI UI tests (AppTest, offline + free)")
@@ -163,6 +194,7 @@ def main():
 
     test_round_robin()
     test_manager_mode()
+    test_agent_count()
 
     print("\n" + "=" * 62)
     total = _passed + _failed

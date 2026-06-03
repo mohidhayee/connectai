@@ -12,7 +12,7 @@ Two collaboration modes (same team, set below):
     the others and synthesises the final answer. Reliable by design (JSON
     decisions, step + cost caps, always returns a best-effort answer).
 
-Edit the `team` list below to add more agents (2–4) or swap their models. In
+Edit the `team` list below to add more agents (2–7) or swap their models. In
 manager mode the first agent is the lead; the rest are workers.
 """
 
@@ -26,7 +26,7 @@ from config import DEFAULT_MODEL_A, DEFAULT_MODEL_B
 
 
 # ── The team ───────────────────────────────────────────────────────────────────
-# Add up to 4 agents here. Give each a different model to combine their strengths.
+# Add up to 7 agents here. Give each a different model to combine their strengths.
 # In --manager mode, the FIRST agent is the lead (its role text is replaced by
 # manager instructions; its model still matters), and the rest are workers.
 team = [

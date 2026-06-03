@@ -20,7 +20,7 @@ delegates subtasks to workers and synthesises the final answer).
 - ✅ **Phase 2** — two-agent collaboration engine: `agent.py`, `orchestrator.py`, `run.py`
 - ✅ **Phase 3** — Streamlit web UI: `app.py` (`streamlit run app.py`)
 - ✅ **Phase 4** — launch docs: real `README.md`, `LICENSE` (MIT), `.env.example`
-- ✅ **Phase 4.5** — BYO keys + per-model picker (5 providers) + 2–4 agents + tabbed UI.
+- ✅ **Phase 4.5** — BYO keys + per-model picker (5 providers) + 2–7 agents + tabbed UI.
   All 5 keys (Groq/Gemini/OpenAI/Anthropic/Perplexity) live in `.env` and tested working.
 - ✅ **Manager mode** — `manager.py`: a lead agent delegates subtasks + synthesises the final
   answer, with structured-JSON decisions, retries, step/cost/per-worker/no-progress caps,
@@ -69,7 +69,7 @@ python test_manager.py                     # Manager-mode logic tests (offline, 
 python test_app.py                         # Streamlit UI smoke tests (offline, free)
 python run.py "your task here"             # CLI: round-robin collaboration
 python run.py --manager "your task here"   # CLI: Manager mode (lead delegates + synthesises)
-streamlit run app.py                       # web UI (mode switch, BYO keys, 2–4 agents, picker)
+streamlit run app.py                       # web UI (mode switch, BYO keys, 2–7 agents, picker)
 ```
 
 ## Architecture (keep it this way)
@@ -82,7 +82,7 @@ streamlit run app.py                       # web UI (mode switch, BYO keys, 2–
   short backoff (`_RETRY_BACKOFF`) before raising `ProviderError`; non-transient errors fail
   fast. Never call litellm directly elsewhere.
 - `agent.py` — `Agent(name, model, role, api_key=None)`; `.provider` is derived from model.
-- `orchestrator.py` — `run(agents_list, task, max_turns)`; round-robin over 2–4 agents; an
+- `orchestrator.py` — `run(agents_list, task, max_turns)`; round-robin over 2–7 agents; an
   agent may only signal DONE at the end of a full round (`turn>=n and turn%n==0`).
 - `manager.py` — Manager mode. `run_manager(manager, workers, task, *, max_steps,
   max_cost_usd, max_retries, max_calls_per_worker, stall_limit, use_critic)` is a generator

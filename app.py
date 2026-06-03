@@ -6,7 +6,7 @@ Run with:
 
 Three tabs:
   ▶️ Run       — write the task, run the team, watch them collaborate
-  👥 Team      — configure your 2–4 agents (name, model, role)
+  👥 Team      — configure your 2–7 agents (name, model, role)
   🔑 API keys  — paste your own keys (kept in this session only)
 """
 
@@ -24,7 +24,7 @@ from config import (
 )
 
 CUSTOM = "__custom__"  # sentinel for "type your own model id"
-MIN_AGENTS, MAX_AGENTS = 2, 4
+MIN_AGENTS, MAX_AGENTS = 2, 7
 
 DEFAULT_ROLE_A = (
     "You are Planner, a strategic thinker. "

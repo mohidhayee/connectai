@@ -85,7 +85,7 @@ ConnectAI was built in phases. Each added one capability and ended in a commit.
 | **2 — Collaboration engine** | `Agent`, the round-robin `orchestrator`, and the `run.py` CLI — two agents passing a shared scratchpad. |
 | **3 — Web UI** | The Streamlit `app.py`. |
 | **4 — Launch prep** | Real `README.md`, MIT `LICENSE`, `.env.example`. |
-| **4.5 — Flexibility** | Bring-your-own-keys, a per-agent model picker across 5 providers, 2–4 agents, a tabbed UI. |
+| **4.5 — Flexibility** | Bring-your-own-keys, a per-agent model picker across 5 providers, 2–7 agents, a tabbed UI. |
 | **Manager Mode** | The lead-delegates-and-synthesises mode (the focus of this doc). |
 | **5 — Next** | Live demo + community feedback (not done yet). |
 

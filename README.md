@@ -16,7 +16,7 @@ It's a small, hand-rolled, open-source experiment in cross-vendor AI collaborati
 
 - **Mix providers and models.** Pick any model per agent from a curated list (with
   "what it's best at" tags) — or type any custom model id. Combine their strengths.
-- **2–4 agents.** Add up to four collaborators that take turns on a shared scratchpad.
+- **2–7 agents.** Add up to seven collaborators that take turns on a shared scratchpad.
 - **Two collaboration modes.** *Round-robin* (agents take turns) or **Manager mode** — a
   lead agent delegates subtasks to the others and synthesises the final answer, with every
   decision shown live and hard caps on steps and cost.
@@ -77,7 +77,7 @@ Small, readable files, each with one job:
 | `config.py` | The model catalog — providers + a curated list of models (with strengths). The one place to add/retire models. |
 | `providers.py` | The universal translator — one `ask(model=...)` calls any model (via `litellm`), tracks cost, resolves the API key (yours or from `.env`). |
 | `agent.py` | One team member — an `Agent` has a name, a model, a role, an optional key, and its own memory. |
-| `orchestrator.py` | The chairperson — runs the round-robin over 2–4 agents on a shared scratchpad. |
+| `orchestrator.py` | The chairperson — runs the round-robin over 2–7 agents on a shared scratchpad. |
 | `manager.py` | The lead — Manager mode's delegate → work → synthesise loop: JSON decisions, retries, and every safety cap (steps, cost, per-worker, no-progress). |
 | `app.py` / `run.py` | The two front doors — a Streamlit web UI and a terminal CLI. |
 
@@ -96,7 +96,7 @@ Mode's reliability engineering — including how every failure mode was tested.
 - [x] **Phase 2** — Two-agent collaboration engine
 - [x] **Phase 3** — Streamlit web UI
 - [x] **Phase 4** — Open-source launch prep (docs, MIT license)
-- [x] **Phase 4.5** — BYO keys · per-model picker · 2–4 agents
+- [x] **Phase 4.5** — BYO keys · per-model picker · 2–7 agents
 - [x] **Manager mode** — a lead delegates + synthesises; structured, cost-capped, reliable *(you're looking at it)*
 - [ ] **Phase 5** — Live demo, share, listen, iterate
 
