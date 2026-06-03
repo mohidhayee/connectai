@@ -20,13 +20,14 @@ delegates subtasks to workers and synthesises the final answer).
 - ✅ **Phase 2** — two-agent collaboration engine: `agent.py`, `orchestrator.py`, `run.py`
 - ✅ **Phase 3** — Streamlit web UI: `app.py` (`streamlit run app.py`)
 - ✅ **Phase 4** — launch docs: real `README.md`, `LICENSE` (MIT), `.env.example`
-- ✅ **Phase 4.5** — BYO keys + per-model picker (5 providers) + 2–7 agents + tabbed UI.
+- ✅ **Phase 4.5** — BYO keys + per-model picker (5 providers) + 2–7 agents + chat-style UI
+  (sidebar config + a conversation of message bubbles; redesigned from the old tabs).
   All 5 keys (Groq/Gemini/OpenAI/Anthropic/Perplexity) live in `.env` and tested working.
 - ✅ **Manager mode** — `manager.py`: a lead agent delegates subtasks + synthesises the final
   answer, with structured-JSON decisions, retries, step/cost/per-worker/no-progress caps,
   graceful always-an-answer termination, an optional 1-pass critic, and a live UI timeline.
   Round-robin kept fully working. Tests: `test_manager.py` (36 offline) + `test_app.py`
-  (3) + offline retry tests in `test_providers.py`.
+  (6) + offline retry tests in `test_providers.py`.
 - ⏭️ **NEXT → Phase 5** — add a README screenshot (TODO marker is in `README.md`); deploy
   free demo to Streamlit Community Cloud; user posts to ≥3 communities (needs user accounts).
 
@@ -89,14 +90,21 @@ streamlit run app.py                       # web UI (mode switch, BYO keys, 2–
   of events; `decide()` (validated JSON + retries), `synthesize()` (best-effort with a
   deterministic fallback), `parse_decision()` (robust parser), and the caps live here.
   Round-robin stays in `orchestrator.py` — manager mode is additive.
-- `app.py` — imports `_build_prompt`/`_DONE_SIGNAL` from orchestrator and `run_manager` from
-  manager (one source of truth per mode). `build_agents()` is shared; `manager_timeline()`
-  renders the Manager event stream. Mode switch + lead picker in the Team tab. BYO keys live
-  in `st.session_state` only (never written to disk). Keep selectbox `format_func`s pure
-  (no `st.session_state` reads) — AppTest calls them outside a script run.
-- `test_providers.py` — smoke-tests the first model of each provider that has a key.
+- `app.py` — chat-style UI. Imports `_build_prompt`/`_DONE_SIGNAL` from orchestrator and
+  `run_manager` from manager (one source of truth per mode). Layout: a **sidebar** holds all
+  config (mode, lead picker, the 2–7 agent team, API keys, caps, last-run cost, download,
+  clear); the **main area** is a conversation — each turn / decision / worker reply / final
+  answer is an `st.chat_message` bubble (built by `run_round_robin()` / `run_manager_chat()`,
+  rendered by `render_message()`), with an `st.chat_input` composer pinned at the bottom. The
+  conversation persists in `st.session_state.messages`; the collaboration only runs on submit.
+  `build_agents()` is shared. Gotchas: chat-message avatars must be REAL emoji — config glyphs
+  like Gemini's "✦" and the "•" fallback aren't valid, so `avatar_for()` maps providers to safe
+  emoji; and keep selectbox `format_func`s pure (no `st.session_state` reads) — AppTest calls
+  them outside a script run. BYO keys live in `st.session_state` only (never written to disk).
+- `test_providers.py` — offline retry tests + a live per-provider smoke test.
 - `test_manager.py` — offline Manager-mode tests (parser + every guardrail, via a fake
-  provider). `test_app.py` — offline Streamlit AppTest for both modes. Both free.
+  provider). `test_app.py` — offline Streamlit AppTest for both modes (incl. a non-Groq
+  avatar regression + the 2–7 agent cap). All free.
 - `.env` — secrets (gitignored, NEVER commit). All keys optional; `.env.example` shows shape.
 
 ## Provider notes (learned the hard way)

@@ -85,7 +85,7 @@ ConnectAI was built in phases. Each added one capability and ended in a commit.
 | **2 — Collaboration engine** | `Agent`, the round-robin `orchestrator`, and the `run.py` CLI — two agents passing a shared scratchpad. |
 | **3 — Web UI** | The Streamlit `app.py`. |
 | **4 — Launch prep** | Real `README.md`, MIT `LICENSE`, `.env.example`. |
-| **4.5 — Flexibility** | Bring-your-own-keys, a per-agent model picker across 5 providers, 2–7 agents, a tabbed UI. |
+| **4.5 — Flexibility** | Bring-your-own-keys, a per-agent model picker across 5 providers, 2–7 agents, a tabbed UI (later redesigned into a sidebar + chat-bubble layout). |
 | **Manager Mode** | The lead-delegates-and-synthesises mode (the focus of this doc). |
 | **5 — Next** | Live demo + community feedback (not done yet). |
 
@@ -267,7 +267,7 @@ gracefully by making it fail** — and do it offline so it's free and determinis
     per-worker cap, and the cost cap both already-over *and* crossed mid-run
     (asserting **no** extra paid synth call). Every case asserts a non-empty final
     answer.
-- **`test_app.py` (3 checks, offline, $0).** Streamlit's `AppTest` drives the real
+- **`test_app.py` (6 checks, offline, $0).** Streamlit's `AppTest` drives the real
   UI in both modes with the model layer faked — asserting no exception, that the
   Manager timeline shows the delegation/worker reply/final answer, and that changing
   the lead reassigns the workers.
@@ -307,7 +307,7 @@ pip install -r requirements.txt
 cp .env.example .env          # paste a free Groq key (console.groq.com/keys)
 
 python test_manager.py        # 35 offline reliability checks ($0)
-python test_app.py            # 3 offline UI checks ($0)
+python test_app.py            # 6 offline UI checks ($0)
 
 streamlit run app.py          # web UI: Team tab → Manager mode → pick the lead
 python run.py --manager "plan a balanced 3-day Stockholm itinerary"
